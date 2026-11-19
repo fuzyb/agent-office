@@ -22,6 +22,7 @@ import { renderTitle } from '../../shared/title';
 import { store } from '../../state';
 import { $ } from '../../ui/dom';
 import { openExpand } from '../../ui/floorplan';
+import { openIdentityDialog } from '../../ui/identity';
 import { renderWorkers } from '../../ui/workers-panel';
 import { renderLimits } from '../../ui/limits';
 import { modelBadge, providerLabel } from '../../ui/provider';
@@ -44,6 +45,8 @@ export interface WorkerView {
   model: Worker;
   laptop: Laptop;
   deskId: string;
+  /** The name its nameplate shows, to see when it's renamed. */
+  name: string;
   status: string;
   acked: boolean;
 }
@@ -139,8 +142,14 @@ export function installWorkerViews(ctx: Ctx, core: CoreState, parts: WorkerViews
         desk.laptopAnchor.add(laptop.root);
         noOutline(desk.group);
         desk.chair.rotation.y = 0;
-        v = { model, laptop, deskId: w.deskId, status: '', acked: true };
+        v = { model, laptop, deskId: w.deskId, name: w.name, status: '', acked: true };
         workerViews.set(w.id, v);
+      }
+      // Renamed: the nameplate says so too (it's the same worker, at the same desk).
+      if (v.name !== w.name) {
+        v.name = w.name;
+        v.model.setName(w.name);
+        noOutline(v.model.root);
       }
       if (v.status !== w.status || v.acked !== w.acked) {
         // It just finished or started waiting on you (not already so when this page first saw it): ding (one that needs you has an alarm of its own, see features/needsyou), and notify if you're away.
@@ -194,7 +203,7 @@ export function installWorkerViews(ctx: Ctx, core: CoreState, parts: WorkerViews
     arrangeSeats();
     // Whoever's waiting on someone lines up for the throne, the one who's waited longest first.
     court?.line(waitingInOrder(store.workers.values()).filter(inCourt).map((w) => w.id));
-    renderWorkers((id) => parts.waiting.openWorkerTerminal(id));
+    renderWorkers((id) => parts.waiting.openWorkerTerminal(id), (id) => openIdentityDialog(net, id));
     parts.waiting.renderWaiting();
     parts.notifier.sync(store.workers);
     renderTitle();

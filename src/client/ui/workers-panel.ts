@@ -4,16 +4,18 @@
 import { needyFirst } from '../nextup';
 import { store } from '../state';
 import { DESK_BY_ID } from '../../shared/layout';
+import { shownRole } from '../../shared/worker-identity';
 import { $, h, STATUS_LABEL, timeAgo } from './dom';
 import { usageLabel, usageTitle } from './usage';
 import { providerLabel, providerUsageState, providerWaitingLabel, resolvedProvider, modelBadge } from './provider';
 
-export function renderWorkers(onOpen: (id: string) => void) {
+export function renderWorkers(onOpen: (id: string) => void, onRename?: (id: string) => void) {
   const ul = $('workers');
   ul.replaceChildren();
   const workers = needyFirst(store.workers.values());
   for (const w of workers) {
     const asking = w.status === 'needs_input' && !w.lost;
+    const role = shownRole(w);
     const provider = w.kind === 'agent' ? providerLabel(w.provider, store.project) : null;
     const providerKind = w.kind === 'agent' ? resolvedProvider(w.provider, store.project) : undefined;
     const usageState = w.kind === 'agent' ? providerUsageState(w.provider, store.project, w.usage) : undefined;
@@ -28,8 +30,12 @@ export function renderWorkers(onOpen: (id: string) => void) {
         'li',
         { class: asking ? 'needs-you-row' : '', onclick: () => onOpen(w.id), title: asking ? `${w.name} needs you: open its terminal to answer` : `Open ${w.name}'s terminal` },
         h('span.dot', { style: `background:${w.color}` }),
-        h('span.name', {}, w.name, sub ? h('span.sub', {}, sub) : null,
+        h('span.name', {}, w.name, role ? h('span.role', { title: 'What it was hired for: a label, not a permission' }, role) : null, sub ? h('span.sub', {}, sub) : null,
           usageState === 'tracked' && w.usage ? h('span.cost', { title: usageTitle(w.usage, providerKind) }, usageLabel(w.usage, providerKind)) : null),
+        // Not for a board agent, whose name is fixed.
+        onRename && !DESK_BY_ID.get(w.deskId)?.station
+          ? h('button.btn.rename', { type: 'button', title: `Rename ${w.name}`, 'aria-label': `Rename ${w.name}`, onclick: (e: Event) => { e.stopPropagation(); onRename(w.id); } }, '✏️')
+          : null,
         w.lost ? h('span.pill.lost', { title: 'Its worktree was deleted outside agent-office: open it to fix it' }, 'worktree deleted') : h('span.pill', { class: w.status }, asking ? 'NEEDS YOU' : (STATUS_LABEL[w.status] ?? w.status)),
         ask,
       ),

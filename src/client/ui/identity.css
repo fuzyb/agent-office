@@ -1,0 +1,12 @@
+/* A worker's name and role (ui/identity.ts): the two fields in the hire dialog, and the rename window. */
+.identity-fields { display: flex; flex-direction: column; gap: 4px; margin-top: 10px; min-width: 0; }
+.identity-fields label { font-weight: 800; font-size: 14px; }
+.identity-fields label:not(:first-child) { margin-top: 8px; }
+.identity-optional { font-weight: 700; color: var(--muted); }
+.identity-fields input[aria-invalid] { border-color: var(--bad); }
+.identity-select { width: 100%; min-width: 0; padding: 8px 10px; border: 2px solid var(--ink); border-radius: 10px; background: #fff; color: var(--ink); font: inherit; font-size: 14px; font-weight: 800; }
+.identity-note { margin: 0; color: var(--muted); font-size: 11px; font-weight: 700; line-height: 1.25; }
+.identity-note.bad { color: var(--bad); }
+/* The role under a worker's name, in the list and wherever it's named: what it is for, apart from what it's called. */
+.workers .role { display: block; font-size: 11px; font-weight: 800; color: var(--accent-2, var(--muted)); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.workers .rename { flex: none; margin-left: 4px; padding: 2px 6px; font-size: 12px; line-height: 1; }

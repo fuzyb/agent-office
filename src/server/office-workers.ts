@@ -8,6 +8,7 @@ import type { AgentEffort, AgentProvider, GhPull, QueueTask, WorkerInfo, WorkerS
 import { isAgentEffort, isAgentProvider } from '../shared/protocol.js';
 import { DESK_BY_ID, STATION_AGENT } from '../shared/layout.js';
 import { workerPr } from '../shared/status.js';
+import { given, nameKey, parseWorkerName, parseWorkerRole, roleLabel, workerRole } from '../shared/worker-identity.js';
 import { landedWork, notLeaving } from './leave-on-merge.js';
 
 /** One worker as an agent sees it: enough to pick the ones to send home, and say why. */
@@ -15,6 +16,9 @@ export interface WorkerRow {
   id: string;
   name: string;
   kind: 'agent' | 'shell';
+  /** What it was hired for (see WORKER_ROLES): a label for telling workers apart, never what it may do. Not on a shell or a board agent. */
+  role?: string;
+  roleLabel?: string;
   provider?: AgentProvider;
   model?: string;
   desk: string;
@@ -73,6 +77,7 @@ export function workerRow(w: WorkerInfo, view: PullsView, me?: string): WorkerRo
     id: w.id,
     name: w.name,
     kind: w.kind,
+    ...(w.kind === 'agent' && !seat?.station ? { role: workerRole(w), roleLabel: roleLabel(workerRole(w)) } : {}),
     ...(w.provider ? { provider: w.provider } : {}),
     ...(w.model ? { model: w.model } : {}),
     desk: seat?.label ?? w.deskId,
@@ -94,16 +99,16 @@ export function workerRow(w: WorkerInfo, view: PullsView, me?: string): WorkerRo
 }
 
 /**
- * The worker `key` names: its id, or its name in any case (a shell's without the 🐚). A string when
- * there's no such worker, saying who there is.
+ * The worker `key` names: its id, which always wins, or else its name (see nameKey: any case, a shell's
+ * without the 🐚). A name is only what it's called now, so the id is the one to hold on to. A string
+ * when there's no such worker, saying who there is.
  */
 export function findWorker(workers: WorkerInfo[], key: string): WorkerInfo | string {
   const k = key.trim();
   if (!k) return 'Say which worker: its name or id';
   const byId = workers.find((w) => w.id === k);
   if (byId) return byId;
-  const plain = (name: string) => name.replace(/\s*🐚$/u, '').trim().toLowerCase();
-  const named = workers.filter((w) => plain(w.name) === plain(k));
+  const named = workers.filter((w) => nameKey(w.name) === nameKey(k));
   if (named.length === 1) return named[0];
   if (named.length > 1) return `More than one worker is called ${k}: use an id (${named.map((w) => w.id).join(', ')})`;
   return `No worker here is called ${k}${workers.length ? ` (there's ${workers.map((w) => w.name).join(', ')})` : ' (nobody is at a desk)'}`;
@@ -140,6 +145,9 @@ export interface HireRequest {
   worktree?: boolean;
   desk?: string;
   issue?: number;
+  /** What to call it, and what it's for (see WorkerInfo.name and .role). Left out: the next free name, and a general worker. */
+  name?: string;
+  role?: string;
 }
 
 export function readHireRequest(body: unknown, providers: AgentProvider[]): HireRequest | string {
@@ -155,6 +163,10 @@ export function readHireRequest(body: unknown, providers: AgentProvider[]): Hire
   const seat = typeof b.desk === 'string' ? DESK_BY_ID.get(b.desk) : undefined;
   if (b.desk !== undefined && (!seat || seat.station || seat.room)) return "desk is a desk or bean bag's id, like desk-3";
   if (b.issue !== undefined && !(Number.isSafeInteger(b.issue) && (b.issue as number) > 0)) return 'issue is an issue number';
+  const name = given(b.name) === undefined ? undefined : parseWorkerName(b.name);
+  if (name && 'error' in name) return name.error;
+  const role = given(b.role) === undefined ? undefined : parseWorkerRole(b.role);
+  if (role && 'error' in role) return role.error;
   return {
     prompt,
     ...(b.provider !== undefined ? { provider: b.provider as AgentProvider } : {}),
@@ -163,6 +175,8 @@ export function readHireRequest(body: unknown, providers: AgentProvider[]): Hire
     ...(typeof b.worktree === 'boolean' ? { worktree: b.worktree } : {}),
     ...(typeof b.desk === 'string' ? { desk: b.desk } : {}),
     ...(b.issue !== undefined ? { issue: b.issue as number } : {}),
+    ...(name ? { name: name.name } : {}),
+    ...(role ? { role: role.role } : {}),
   };
 }
 

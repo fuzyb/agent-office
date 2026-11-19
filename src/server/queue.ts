@@ -76,8 +76,13 @@ export class TaskQueue {
     this.timer = setInterval(() => this.pump(), PUMP_MS);
   }
 
+  /** What the worker on a task is called now, while it's at a desk: it may have been renamed since it took the task. Gone, the task keeps the name it was taken under. */
+  private liveName(t: QueueTask): string | undefined {
+    return t.workerId ? this.workers.list().find((w) => w.id === t.workerId)?.name : undefined;
+  }
+
   state(): QueueState {
-    return { tasks: this.tasks.map((t) => ({ ...t })), maxWorkers: this.maxWorkers };
+    return { tasks: this.tasks.map((t) => ({ ...t, ...(this.liveName(t) ? { workerName: this.liveName(t) } : {}) })), maxWorkers: this.maxWorkers };
   }
 
   get limit(): number {
@@ -119,7 +124,7 @@ export class TaskQueue {
   remove(taskId: string): string | undefined {
     const t = this.tasks.find((x) => x.id === taskId);
     if (!t) return 'No such task';
-    if (t.status === 'running') return `${t.workerName ?? 'Its worker'} is on it — send the worker home to stop it`;
+    if (t.status === 'running') return `${this.liveName(t) ?? t.workerName ?? 'Its worker'} is on it — send the worker home to stop it`;
     this.tasks.splice(this.tasks.indexOf(t), 1);
     this.changed();
     this.pump();
@@ -261,7 +266,7 @@ export class TaskQueue {
     t.status = 'done';
     t.outcome = outcome;
     t.finishedAt = Date.now();
-    const who = t.workerName ?? 'Its worker';
+    const who = this.liveName(t) ?? t.workerName ?? 'Its worker';
     if (outcome === 'done') {
       this.events.toast(`📋 ${who} finished ${label(t)}`, 'info');
       // The worker most likely just opened the PR; go and link it.

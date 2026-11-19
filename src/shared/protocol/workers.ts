@@ -36,7 +36,18 @@ export interface WorkerInfo {
   /** Reasoning effort requested for this worker, when one was chosen. */
   effort?: AgentEffort;
   deskId: string;
+  /**
+   * What it's called: set when it's hired (the one the person typed, else the next free one in the
+   * pool) and changeable (see 'worker.identity'). It is not who it is: that's `id`. Two workers on
+   * different floors can share one, and so can two that were on the same floor at different times.
+   */
   name: string;
+  /**
+   * What it's for, as a role id (see WORKER_ROLES in shared/worker-identity.ts); absent for a worker
+   * hired before roles existed, a shell and a board agent, which count as the default (workerRole).
+   * A label, never a permission: no check in the office reads it.
+   */
+  role?: string;
   color: string;
   status: WorkerStatus;
   /** True once someone opened the terminal after the last done / needs_input. */
@@ -177,7 +188,15 @@ export interface JailState {
 export type WorkerClientMsg =
   /** With `issue`, the worker is there for that GitHub issue: it moves to In progress at once, is assigned on GitHub (which keeps it there) and taken off the queue. */
   /** With `repos` (other floors' ids), the worker works in their repositories too, each in a worktree of its own (see WorkerInfo.repos). */
-  | { t: 'worker.spawn'; deskId: string; prompt?: string; worktree?: boolean; kind?: WorkerKind; provider?: AgentProvider; model?: string; effort?: AgentEffort; issue?: number; repos?: string[]; via?: 'herald' }
+  /** With `name` and `role`, it's hired under that name and for that role (see WorkerInfo.name and .role); without them it gets the next free name and the default role. */
+  | { t: 'worker.spawn'; deskId: string; prompt?: string; worktree?: boolean; kind?: WorkerKind; provider?: AgentProvider; model?: string; effort?: AgentEffort; issue?: number; repos?: string[]; via?: 'herald'; name?: string; role?: string }
+  /**
+   * Renames a worker and/or changes its role, without touching its session, worktree, branch, task
+   * or anything that points at it by id. Both are checked and applied together, or neither is.
+   * `expect` is what the page showed when it asked: if either has changed since (someone else got
+   * there first), nothing is applied.
+   */
+  | { t: 'worker.identity'; workerId: string; name?: string; role?: string; expect?: { name?: string; role?: string } }
   | { t: 'worker.resume'; workerId: string }
   | { t: 'worker.kill'; workerId: string; cleanup?: WorktreeCleanup }
   /** Asks what the worker's worktree holds; answered with a `worker.worktree` message. */

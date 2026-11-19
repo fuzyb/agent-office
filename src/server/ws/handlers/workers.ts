@@ -4,6 +4,7 @@ import { MAX_REPOS, type RepoSource } from '../../workers.js';
 import { OPEN_CODE_MODEL_MAX } from '../../../shared/providers.js';
 import { isAgentEffort, isAgentProvider, type WorkerClientMsg } from '../../../shared/protocol.js';
 import { issueNumber, num, str } from '../../office/input.js';
+import { given, roleLabel } from '../../../shared/worker-identity.js';
 import { here, workerOf } from './common.js';
 import type { FeatureHooks, HandlerMap, ViewPieces } from './types.js';
 
@@ -36,7 +37,7 @@ export const workerHandlers = {
     }
     // A shell is theirs too: `claude auth login` or `gh auth login` typed there signs them in.
     const hire = () => {
-      const r = floor.workers.spawn(str(msg.deskId, 32), who, str(msg.prompt, 20000) || undefined, msg.worktree === true, kind, msg.provider, model, effort, undefined, c.accountId, repos, msg.via === 'herald' ? 'herald' : undefined);
+      const r = floor.workers.spawn(str(msg.deskId, 32), who, str(msg.prompt, 20000) || undefined, msg.worktree === true, kind, msg.provider, model, effort, undefined, c.accountId, repos, msg.via === 'herald' ? 'herald' : undefined, { name: given(msg.name), role: given(msg.role) });
       const issue = kind === 'agent' ? issueNumber(msg.issue) : undefined;
       const across = repos.length ? ` across ${[floor.def.name, ...repos.map((x) => x.name)].join(' + ')}` : '';
       if (typeof r === 'string') ctx.warn(c, r);
@@ -46,6 +47,19 @@ export const workerHandlers = {
     // Every project it gets a worktree of starts from what's on GitHub.
     const fresh = [floor, ...repos.map((x) => ctx.floors.get(x.floor)!)];
     ctx.withSignIn(c, kind === 'agent' ? ctx.claudeFor(msg.provider ?? floor.workers.officeDefault.provider) : undefined, () => (msg.worktree === true ? ctx.withFreshBase(c, fresh, hire) : hire()));
+  },
+  'worker.identity'(ctx, c, msg) {
+    const who = c.peer.name;
+    const floor = here(ctx, c);
+    if (!floor) return;
+    // Only a worker on the floor you're on, found by its id: not by what it's called, and not on another floor.
+    const wid = str(msg.workerId, 32);
+    if (!floor.workers.get(wid)) return ctx.warn(c, 'No such worker on this floor');
+    const seen = msg.expect && typeof msg.expect === 'object' ? msg.expect : {};
+    const r = floor.workers.identity.update(wid, { name: msg.name, role: msg.role, expect: { name: typeof seen.name === 'string' ? seen.name : undefined, role: typeof seen.role === 'string' ? seen.role : undefined } });
+    if (typeof r === 'string') return ctx.warn(c, r);
+    const said = [r.changed.includes('name') && `renamed ${r.was.name} to ${r.info.name}`, r.changed.includes('role') && `gave ${r.info.name} the ${roleLabel(r.info.role ?? '')} role`].filter(Boolean).join(' and ');
+    if (said) ctx.toastFloor(floor, `${who} ${said}`);
   },
   'worker.resume'(ctx, c, msg) {
     const w = workerOf(ctx, msg.workerId);

@@ -9,6 +9,7 @@ import { canLabel } from '../../../shared/floorplan';
 import { officeFull, pressureNote } from '../../../shared/machine';
 import type { AgentEffort, AgentProvider, WorkerInfo } from '../../../shared/protocol';
 import { isAsleep, isBusy } from '../../../shared/status';
+import { shownRole } from '../../../shared/worker-identity';
 import type { Ctx, Hint } from '../../core/context';
 import type { CoreState } from '../../core/ctx';
 import { seatBuilt } from '../../core/floors';
@@ -77,8 +78,8 @@ export function installWorkerActions(ctx: Ctx, core: CoreState, parts: WorkerAct
     return true;
   }
 
-  function hire(deskId: string, prompt?: string, worktree = false, provider?: AgentProvider, model?: string, effort?: AgentEffort, issue?: number, repos?: string[], via?: 'herald') {
-    net.send({ t: 'worker.spawn', deskId, prompt, worktree, provider, model, effort, issue, repos: repos?.length ? repos : undefined, via });
+  function hire(deskId: string, prompt?: string, worktree = false, provider?: AgentProvider, model?: string, effort?: AgentEffort, issue?: number, repos?: string[], via?: 'herald', name?: string, role?: string) {
+    net.send({ t: 'worker.spawn', deskId, prompt, worktree, provider, model, effort, issue, repos: repos?.length ? repos : undefined, via, name, role });
     // The moment notifications start to matter: ask once (it has to come from a key press or click).
     if (settings.notify && notifyPermission() === 'default' && !askedToNotify) {
       askedToNotify = true;
@@ -102,9 +103,10 @@ export function installWorkerActions(ctx: Ctx, core: CoreState, parts: WorkerAct
         warning: pressureNote(store.machine),
         submitLabel: 'Hire & start',
         providerOption: true,
+        identityOption: true,
         worktreeOption: !!store.project?.branch,
         repoOptions: repoChoices(),
-        onSubmit: (text, o) => hire(deskId, text, o.worktree, o.provider, o.model, o.effort, undefined, o.repos),
+        onSubmit: (text, o) => hire(deskId, text, o.worktree, o.provider, o.model, o.effort, undefined, o.repos, undefined, o.name, o.role),
       });
     } else if (w.lost) {
       fixLostWorktree(w);
@@ -138,9 +140,10 @@ export function installWorkerActions(ctx: Ctx, core: CoreState, parts: WorkerAct
       submitLabel: 'Hire & start',
       allowEmpty: true,
       providerOption: true,
+      identityOption: true,
       worktreeOption: !!store.project?.branch,
       repoOptions: repoChoices(),
-      onSubmit: (text, o) => hire(deskId, text || undefined, o.worktree, o.provider, o.model, o.effort, undefined, o.repos),
+      onSubmit: (text, o) => hire(deskId, text || undefined, o.worktree, o.provider, o.model, o.effort, undefined, o.repos, undefined, o.name, o.role),
     });
   }
 
@@ -385,10 +388,11 @@ export function installWorkerActions(ctx: Ctx, core: CoreState, parts: WorkerAct
     const workerProvider = w.kind === 'agent' ? resolvedProvider(w.provider, store.project) : undefined;
     const spent = w.kind === 'agent' && w.usage ? usageLabel(w.usage, workerProvider) : '';
     const shell = w.kind === 'shell';
+    const role = shownRole(w);
     return {
-      k: w.status + w.id + (w.pr?.number ?? '') + (w.repos?.map((r) => r.pr?.number ?? '-').join() ?? '') + (w.prOpening ? '!' : '') + doing + spent + (sign ?? ''),
+      k: w.status + w.id + w.name + (role ?? '') + (w.pr?.number ?? '') + (w.repos?.map((r) => r.pr?.number ?? '-').join() ?? '') + (w.prOpening ? '!' : '') + doing + spent + (sign ?? ''),
       parts: [
-        h('span.title', {}, `${sign ? `🪧 ${sign} · ` : ''}${w.name} · ${STATUS_LABEL[w.status]}`),
+        h('span.title', {}, `${sign ? `🪧 ${sign} · ` : ''}${w.name}${role ? ` · ${role}` : ''} · ${STATUS_LABEL[w.status]}`),
         doing ? aside(doing) : '',
         spent ? h('span.cost', { title: usageTitle(w.usage!, workerProvider) }, spent) : '',
         key('E', 'Open terminal'),

@@ -32,3 +32,14 @@ export function newWorker(info: WorkerInfo, tracker: UsageTracker, hookToken = r
     tracker,
   };
 }
+
+/** Brings the viewers a worker's info shows (names, and who by connection) up to date with who has its terminal open; whether that changed anything. */
+export function syncViewers(w: Worker): boolean {
+  const names = [...new Set(w.viewers.values())];
+  const ids = [...w.viewers.keys()];
+  const same = (a: string[], b: string[]) => a.length === b.length && a.every((n, i) => n === b[i]);
+  if (same(names, w.info.viewers) && same(ids, w.info.viewerIds)) return false;
+  w.info.viewers = names;
+  w.info.viewerIds = ids;
+  return true;
+}

@@ -88,7 +88,7 @@ function renderStatus(m: Meeting, body: HTMLElement, foot: HTMLElement, net: Net
         {},
         h('span.dot', { style: `background:${w?.color ?? '#adb5bd'}` }),
         h('b', {}, s.role),
-        h('span.muted', {}, `${i === 0 ? 'head of the table · ' : ''}${s.workerName ?? '…'}`),
+        h('span.muted', {}, `${i === 0 ? 'head of the table · ' : ''}${w?.name ?? s.workerName ?? '…'}`),
         w ? h('span.pill', { class: w.status }, STATUS_LABEL[w.status]) : h('span.pill.exited', {}, 'gone home'),
         part ? h('span.meeting-part', { title: t?.file ?? '' }, part) : null,
         s.tokens ? h('span.muted', {}, `${fmtTokens(s.tokens)} tokens`) : null,
