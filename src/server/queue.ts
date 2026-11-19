@@ -6,6 +6,8 @@ import { DESK_BY_ID, SEATS, nextFreeSeat } from '../shared/layout.js';
 import { validateWorkerEffort, validateWorkerModel } from './agents.js';
 import { savedEffort, savedModel, takesEffort, takesModel } from '../shared/providers.js';
 import { PROMPTS } from '../shared/prompts.js';
+import { cleanNeeds } from '../shared/dispatch.js';
+import type { TaskNeeds } from '../shared/protocol/dispatch.js';
 
 /** What the queue needs from the worker manager. Narrow on purpose, so a smoke test can fake it. */
 export interface QueueWorkers {
@@ -45,6 +47,8 @@ const MAX_TASKS = 100;
 const PUMP_MS = 10_000;
 /** A worker in one of these states is finished with its task (and can make room for the next one). */
 const FINISHED = new Set<WorkerStatus>(['done', 'exited', 'offline']);
+/** A task given to a worker that was already there: how long it may take to go to work on it before the task is called stopped. */
+const ENGAGE_MS = 120_000;
 
 
 /**
@@ -89,9 +93,14 @@ export class TaskQueue {
     return this.maxWorkers;
   }
 
+  /** How many of the queue's tasks are at work now (hired for, or given to a worker by dispatch). */
+  get running(): number {
+    return this.busy();
+  }
+
   /** Queues a task. With no `provider`, it runs on the office's default worker, model and effort included. */
   /** Queues a task; `owner` is the account adding it, whose sign-ins its worker will run on. */
-  add(prompt: string, by: string, title?: string, issue?: number, provider?: AgentProvider, model?: string, effort?: AgentEffort, owner?: string): string | undefined {
+  add(prompt: string, by: string, title?: string, issue?: number, provider?: AgentProvider, model?: string, effort?: AgentEffort, owner?: string, opts: { hold?: boolean; needs?: TaskNeeds } = {}): string | undefined {
     if (provider === undefined) ({ provider, model, effort } = this.workers.officeDefault ?? { provider: this.workers.defaultProvider });
     if (!isAgentProvider(provider) || (provider === 'custom' && this.workers.defaultProvider !== 'custom')) return 'Unknown agent provider';
     const modelError = validateWorkerModel('agent', provider, model);
@@ -112,6 +121,8 @@ export class TaskQueue {
       prompt: clean,
       addedBy: by,
       ...(owner ? { owner } : {}),
+      ...(opts.hold ? { hold: true } : {}),
+      ...(opts.needs ? { needs: opts.needs } : {}),
       addedAt: Date.now(),
       status: 'queued',
     };
@@ -160,10 +171,55 @@ export class TaskQueue {
     if (t.status !== 'done') return 'That task is still on the queue';
     if (t.issue !== undefined && this.tasks.some((x) => x !== t && x.issue === t.issue && x.status !== 'done')) return `Issue #${t.issue} is already on the queue`;
     this.tasks.splice(this.tasks.indexOf(t), 1);
-    const fresh: QueueTask = { id: t.id, provider: t.provider, model: t.model, effort: t.effort, issue: t.issue, title: t.title, prompt: t.prompt, addedBy: t.addedBy, owner: t.owner, addedAt: Date.now(), status: 'queued' };
+    const fresh: QueueTask = { id: t.id, provider: t.provider, model: t.model, effort: t.effort, issue: t.issue, title: t.title, prompt: t.prompt, addedBy: t.addedBy, owner: t.owner, ...(t.hold ? { hold: true } : {}), ...(t.needs ? { needs: t.needs } : {}), addedAt: Date.now(), status: 'queued' };
     this.tasks.push(fresh);
     this.changed();
     this.pump();
+    return undefined;
+  }
+
+  /** Keeps a waiting task for dispatch (`hold`), or lets the queue hire for it as it always did. */
+  setHold(taskId: string, hold: boolean): string | undefined {
+    const t = this.tasks.find((x) => x.id === taskId);
+    if (!t) return 'No such task';
+    if (t.status !== 'queued') return 'That task is not waiting';
+    if (!!t.hold === hold) return undefined;
+    t.hold = hold || undefined;
+    this.changed();
+    this.pump();
+    return undefined;
+  }
+
+  /**
+   * Gives a waiting task to a worker that is already at a desk, instead of hiring one: `send` types it
+   * to the worker, and only when that works does the task start. The caller has checked that the worker
+   * may have it (server/dispatch/); this checks the queue's own side: the task waits, and there's room
+   * under 'workers at once'. A string says why not, and nothing changed.
+   */
+  assign(taskId: string, w: WorkerInfo, by: string, send: () => string | undefined): string | undefined {
+    const t = this.tasks.find((x) => x.id === taskId);
+    if (!t) return 'No such task';
+    if (t.status !== 'queued') return 'That task is not waiting';
+    if (this.busy() >= this.maxWorkers) return `The queue already has ${this.busy()} of ${this.maxWorkers} tasks at work: raise “workers at once” or wait`;
+    const failed = send();
+    if (failed) return failed;
+    t.status = 'running';
+    t.workerId = w.id;
+    t.workerName = w.name;
+    t.branch = w.worktree?.branch;
+    t.startedAt = Date.now();
+    t.assigned = { by, at: Date.now() };
+    t.engaged = false;
+    t.error = undefined;
+    this.lastStatus.set(w.id, w.status);
+    this.events.toast(`📋 ${by} gave ${label(t)} to ${w.name}`, 'info');
+    if (t.issue !== undefined) {
+      const issue = t.issue;
+      void this.events.claimIssue(issue, t.owner).then((err) => {
+        if (err) this.events.toast(`Couldn't assign issue #${issue} on GitHub: ${err}`, 'warn');
+      });
+    }
+    this.changed();
     return undefined;
   }
 
@@ -251,7 +307,15 @@ export class TaskQueue {
       if (t.status !== 'running' || !t.workerId) continue;
       const w = byId.get(t.workerId);
       if (!w) this.finish(t, 'killed');
-      else if (FINISHED.has(w.status)) done = this.finish(t, w.status === 'done' ? 'done' : 'exited') || done;
+      else if (t.assigned && !t.engaged) {
+        // Given to a worker that was at its prompt: it is 'done' or idle until it starts, which is not the end of the task.
+        if (w.status === 'working' || w.status === 'needs_input') t.engaged = true;
+        else if (w.status === 'exited' || w.status === 'offline') done = this.finish(t, 'exited') || done;
+        else if (Date.now() - (t.startedAt ?? 0) > ENGAGE_MS) {
+          t.error = 'The worker did not go to work on it';
+          this.finish(t, 'exited');
+        } else continue;
+      } else if (FINISHED.has(w.status)) done = this.finish(t, w.status === 'done' ? 'done' : 'exited') || done;
       else continue;
       changed = true;
     }
@@ -310,7 +374,8 @@ export class TaskQueue {
   private recyclable(): { t: QueueTask; w: WorkerInfo } | undefined {
     const byId = new Map(this.workers.list().map((w) => [w.id, w]));
     return this.tasks
-      .filter((t) => t.status === 'done' && t.workerId && byId.has(t.workerId))
+      // A worker that was already there when the task was given to it is nobody's to send home to make room.
+      .filter((t) => t.status === 'done' && t.workerId && !t.assigned && byId.has(t.workerId))
       .map((t) => ({ t, w: byId.get(t.workerId!)! }))
       .filter(({ w }) => FINISHED.has(w.status) && w.viewers.length === 0)
       .sort((a, b) => Number(!!b.t.pr) - Number(!!a.t.pr) || (a.t.finishedAt ?? 0) - (b.t.finishedAt ?? 0))[0];
@@ -320,6 +385,8 @@ export class TaskQueue {
     let changed = false;
     for (const t of this.tasks) {
       if (t.status !== 'queued') continue;
+      // Kept for dispatch: only a person gives it a worker, one that is free or a hire they ask for by releasing it.
+      if (t.hold) continue;
       if (this.busy() >= this.maxWorkers) break;
       // A spent budget holds the queue instead of failing every task; the pump seats them once hiring resumes.
       if (this.events.hiringPaused()) break;
@@ -398,6 +465,9 @@ export class TaskQueue {
           prompt: s.prompt,
           addedBy: s.addedBy ?? '?',
           owner: typeof s.owner === 'string' && s.owner ? s.owner : undefined,
+          ...(s.hold === true ? { hold: true } : {}),
+          ...(cleanNeeds(s.needs) ? { needs: cleanNeeds(s.needs) } : {}),
+          ...(s.assigned && typeof s.assigned.by === 'string' && typeof s.assigned.at === 'number' ? { assigned: { by: s.assigned.by, at: s.assigned.at } } : {}),
           addedAt: s.addedAt ?? Date.now(),
           status: s.status === 'running' || s.status === 'done' ? s.status : 'queued',
           workerId: s.workerId,

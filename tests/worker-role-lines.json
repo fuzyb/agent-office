@@ -1,4 +1,10 @@
 {
+ "dispatch/dispatcher.ts": [
+  "role: w.role,"
+ ],
+ "dispatch/extension.ts": [
+  "plan(objective: string): Promise<{ title: string; prompt: string; needs?: { role?: string; skills?: string[] } }[]>;"
+ ],
  "hooks/office-workers.ts": [
   "const r = floor.workers.spawn(desk, who, ask.prompt, worktree, 'agent', provider, ask.model, ask.effort, undefined, owner, [], undefined, { name: ask.name, role: ask.role });"
  ],

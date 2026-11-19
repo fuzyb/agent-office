@@ -14,6 +14,10 @@ import { fileURLToPath } from 'node:url';
 const USAGE = `Usage:
   office-workers list [--json]                  everyone at a desk on this floor: status, task,
                                                 branch and pull request (merged = free to go home)
+  office-workers inventory [--json]             every worker of every floor: its role, agent, status, floor and
+                                                whether it could take a task now (looks only)
+  office-workers preview <task id> [--json]     who could take a waiting queue task, best first, and why the
+                                                others cannot (looks only: a person dispatches it, in the browser)
   office-workers hire [options] <<'EOF'         hire a worker at a free desk; its task on stdin
   …the task…                                    (or --prompt "…"). Options: --provider <name>
   EOF                                           --model <m> --effort <e> --desk <id> --issue <n>
@@ -48,9 +52,9 @@ export const ROLES = [
 /** How long the office may take to come back when it's restarting (a dev reload, an upgrade). */
 const RETRY_MS = 6000;
 /** Sending several workers home waits on git for each; hiring may fetch from GitHub first. */
-const TIMEOUT_MS = { list: 15_000, tell: 15_000, pr: 45_000, hire: 90_000, home: 300_000 };
+const TIMEOUT_MS = { inventory: 15_000, preview: 15_000, list: 15_000, tell: 15_000, pr: 45_000, hire: 90_000, home: 300_000 };
 /** Where each call goes, under /office/workers. */
-const PATHS = { list: '', hire: '', home: '/home', tell: '/tell', pr: '/pr' };
+const PATHS = { inventory: '/inventory', preview: '/preview', list: '', hire: '', home: '/home', tell: '/tell', pr: '/pr' };
 
 /**
  * Reads `--flag value` and `--flag=value` options, and the words that aren't options.
@@ -94,6 +98,16 @@ export function parseArgs(argv) {
   if (cmd === 'mcp') {
     if (rest.length) throw new UsageError(`mcp takes no arguments (got ${rest.join(' ')})`);
     return { cmd: 'mcp' };
+  }
+  if (cmd === 'inventory') {
+    const { opts, words } = options(rest, [], ['--json']);
+    if (words.length) throw new UsageError(`inventory takes no arguments (got ${words.join(' ')})`);
+    return { cmd: 'inventory', json: opts['--json'] === true };
+  }
+  if (cmd === 'preview') {
+    const { opts, words } = options(rest, [], ['--json']);
+    if (words.length !== 1) throw new UsageError('preview takes one queue task id');
+    return { cmd: 'preview', task: words[0], json: opts['--json'] === true };
   }
   if (cmd === 'list' || cmd === 'ls') {
     const { opts, words } = options(rest, [], ['--json']);
@@ -166,7 +180,7 @@ export function officeEnv(env) {
 
 /**
  * The HTTP request for one of the office's worker calls.
- * @param {'list' | 'hire' | 'home' | 'tell' | 'pr'} what
+ * @param {'list' | 'inventory' | 'preview' | 'hire' | 'home' | 'tell' | 'pr'} what
  * @param {{ url: string, worker: string, token: string }} office
  * @param {Record<string, unknown>} [body]
  * @returns {{ method: string, url: string, headers: Record<string, string>, body?: string, timeout: number }}
@@ -175,7 +189,8 @@ export function buildRequest(what, office, body) {
   const url = new URL(`${office.url}/office/workers${PATHS[what]}`);
   url.searchParams.set('worker', office.worker);
   const headers = { authorization: `Bearer ${office.token}` };
-  if (what === 'list') return { method: 'GET', url: url.href, headers, timeout: TIMEOUT_MS.list };
+  if (what === 'preview') url.searchParams.set('task', String(body?.task ?? ''));
+  if (what === 'list' || what === 'inventory' || what === 'preview') return { method: 'GET', url: url.href, headers, timeout: TIMEOUT_MS[what] };
   return { method: 'POST', url: url.href, headers: { ...headers, 'content-type': 'application/json' }, body: JSON.stringify(body ?? {}), timeout: TIMEOUT_MS[what] };
 }
 
@@ -215,7 +230,7 @@ async function send(req, fetchImpl) {
 
 /**
  * Makes one call to the office; resolves to what it answered, or throws with why it said no.
- * @param {'list' | 'hire' | 'home' | 'tell' | 'pr'} what
+ * @param {'list' | 'inventory' | 'preview' | 'hire' | 'home' | 'tell' | 'pr'} what
  * @param {Record<string, unknown> | undefined} body
  * @param {{ env: Record<string, string | undefined>, fetch: typeof fetch }} io
  */
@@ -223,6 +238,28 @@ export async function call(what, body, io) {
   const res = await send(buildRequest(what, officeEnv(io.env), body), io.fetch);
   if (res.status < 200 || res.status >= 300) throw new Error(refusal(res.status, res.body));
   return res.body;
+}
+
+/** The inventory, a line per worker. */
+export function formatInventory(inv) {
+  const lines = (inv.rows ?? []).map((r) => {
+    const kind = r.seat === 'worker' ? [r.provider, r.roleLabel].filter(Boolean).join(', ') : r.seat;
+    const unknown = r.seat === 'worker' && !r.roleKnown ? ' (role unknown to this office: counts as general)' : '';
+    return `${r.name} (${kind}${unknown}) · ${r.floorName} · ${r.status} · ${r.availability}${r.blockedBy?.length ? `: ${r.blockedBy.join('; ')}` : ''}`;
+  });
+  if (inv.usageNote) lines.push(`Usage: ${inv.usageNote}`);
+  if (inv.subagents?.length) lines.push(`Project subagents (not workers): ${inv.subagents.map((s) => s.name).join(', ')}`);
+  lines.push('Dispatch is manual: a person confirms each task. Nobody is hired for a task.');
+  return lines.join('\n');
+}
+
+/** A preview, in words. */
+export function formatPreview(p) {
+  const lines = [`${p.title} (task ${p.taskId})`];
+  for (const [i, c] of (p.candidates ?? []).entries()) lines.push(`${i === 0 ? '→' : ' '} ${c.name} (${c.roleLabel}${c.provider ? `, ${c.provider}` : ''}): ${c.reasons.join('; ')}`);
+  for (const b of p.blocked ?? []) lines.push(`✗ ${b.name} (${b.floorName}): ${b.reasons.join('; ')}`);
+  if (p.pending) lines.push(p.pending);
+  return lines.join('\n');
 }
 
 /** One worker, in a line. */
@@ -288,6 +325,26 @@ export const TOOLS = [
       'merged: true means a pull request of its merged and none is open: its work landed and it can go home. staying says why the office would not send it home by itself yet ' +
       '(still working, someone has its terminal open, a board agent...). worktree.deleted: true means its folder was deleted outside the office, so it cannot start until a person rebuilds it at its desk. you: true is you.',
     inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: 'workforce_inventory',
+    title: 'Workforce inventory',
+    description:
+      'Looks at every worker of every floor and says whether it could take a task now: its id, name, role (a label, not a permission; a role this office does not know shows as itself), agent, status, floor, ' +
+      'current task, branch and open pull request, availability (available, busy, waiting, reserved, unavailable) and, when it is not available, why. Board agents, shells and meeting seats are marked ' +
+      'and are never given tasks. Also lists the project subagents (.claude/agents), which are not workers. Changes nothing, and the office hires nobody to answer it.',
+    inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+    annotations: { readOnlyHint: true, openWorldHint: false },
+  },
+  {
+    name: 'dispatch_preview',
+    title: 'Preview who could take a queue task',
+    description:
+      'For a waiting task on this floor\'s queue (office-queue list gives its id), says which existing workers could take it, best first with the reason each was chosen, and why every other worker cannot ' +
+      '(another floor, busy, waiting for a person, another agent, another account, a pull request still open, plan limit). If nobody can, it says the task stays pending: nobody is hired. ' +
+      'This only looks. A person gives the task to a worker, in the browser.',
+    inputSchema: { type: 'object', properties: { task: { type: 'string', description: 'The queue task id.' } }, required: ['task'], additionalProperties: false },
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
@@ -386,6 +443,8 @@ const INSTRUCTIONS =
 async function runTool(name, args, io) {
   const a = args && typeof args === 'object' ? args : {};
   if (name === 'list_workers') return { text: JSON.stringify(await call('list', undefined, io), null, 1) };
+  if (name === 'workforce_inventory') return { text: JSON.stringify(await call('inventory', undefined, io), null, 1) };
+  if (name === 'dispatch_preview') return { text: JSON.stringify(await call('preview', { task: typeof a.task === 'string' ? a.task : '' }, io), null, 1) };
   if (name === 'hire_worker') {
     const answer = await call('hire', a, io);
     const w = answer.worker ?? {};
@@ -509,6 +568,16 @@ export async function main(argv, io = {}) {
       if (stdin.isTTY) throw new UsageError(`Give the prompt on stdin (office-workers ${cmd.cmd} … <<'EOF' … EOF) or with --prompt "…"`);
       return readStdin(stdin);
     };
+    if (cmd.cmd === 'inventory') {
+      const inv = await call('inventory', undefined, ctx);
+      out(cmd.json ? JSON.stringify(inv, null, 2) : formatInventory(inv));
+      return 0;
+    }
+    if (cmd.cmd === 'preview') {
+      const pv = await call('preview', { task: cmd.task }, ctx);
+      out(cmd.json ? JSON.stringify(pv, null, 2) : formatPreview(pv));
+      return 0;
+    }
     if (cmd.cmd === 'list') {
       const view = await call('list', undefined, ctx);
       out(cmd.json ? JSON.stringify(view, null, 2) : formatWorkers(view));
