@@ -1,0 +1,95 @@
+# QA-only workflow, NOT for merge. It checks out exact commits by SHA, runs the build and the tests on a
+# GitHub-hosted Ubuntu runner with a read-only token, and uploads the logs. It publishes and deploys nothing.
+name: QA Linux verification
+
+on:
+  push:
+    branches: ['qa/linux-verify-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.name }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { name: pr-0ace2df-node22,   ref: 0ace2df9b2259bdfbdc0231c7375e32a73c88ba9, node: '22' }
+          - { name: base-852e2ab-node22, ref: 852e2ab28c4f3f31bffdf4b20353bd119c9d3270, node: '22' }
+          - { name: pr-0ace2df-node26,   ref: 0ace2df9b2259bdfbdc0231c7375e32a73c88ba9, node: '26' }
+    steps:
+      # actions pinned by commit SHA (checkout v7, setup-node v7, upload-artifact v7.0.2)
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ matrix.ref }}
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      - name: Environment (before anything is installed)
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          {
+            echo "date: $(date -u +%FT%TZ)"
+            echo "tested commit: $(git rev-parse HEAD)  (expected ${{ matrix.ref }})"
+            [ "$(git rev-parse HEAD)" = "${{ matrix.ref }}" ] || { echo "WRONG COMMIT"; exit 1; }
+            echo "workflow commit: $GITHUB_SHA  event: $GITHUB_EVENT_NAME  run: $GITHUB_RUN_ID"
+            uname -a
+            grep -E '^(PRETTY_NAME|VERSION_ID)=' /etc/os-release
+            echo "runner image: ${ImageOS:-?} ${ImageVersion:-?}"
+            echo "node $(node -v)  npm $(npm -v)  git $(git --version)"
+            echo "cpus: $(nproc)  mem: $(free -m | awk '/Mem:/ {print $2" MB"}')"
+            echo "gh token permissions (declared): contents: read"
+          } | tee "$RUNNER_TEMP/logs/00-environment.log"
+
+      - name: Run everything and record each exit code
+        shell: bash
+        run: |
+          set +e
+          L="$RUNNER_TEMP/logs"; R="$L/results.tsv"; : > "$R"
+          step() { # name, timeout seconds, command...
+            local n="$1" t="$2"; shift 2
+            local s=$SECONDS
+            echo "::group::$n"; echo "\$ $*"
+            timeout "$t" "$@" > "$L/$n.log" 2>&1; local rc=$?
+            tail -n 40 "$L/$n.log"; echo "::endgroup::"
+            printf '%s\t%s\t%ss\t%s\n' "$n" "$rc" "$((SECONDS - s))" "$*" | tee -a "$R"
+          }
+          T="node --import tsx --import=#tests/css --test --test-reporter=spec"
+          step 01-npm-ci          1200 npm ci
+          step 02-typecheck       900  npm run typecheck
+          step 03-build           900  npm run build
+          step 04-workers.test    900  $T tests/workers.test.ts
+          step 05-repos.test      900  $T tests/repos.test.ts
+          step 06-dsh.test        900  $T tests/dsh.test.ts
+          step 07-identity-tests  900  $T tests/worker-identity.test.ts tests/worker-identity-spoofing.test.ts tests/worker-role-label.test.ts tests/office-workers.test.ts tests/size.test.ts
+          step 08-full-suite      2400 $T tests/*.test.ts
+          echo "--- summary ---"; column -t -s $'\t' "$R"
+          { echo "### ${{ matrix.name }} @ $(git rev-parse --short HEAD)"; echo '```'; column -t -s $'\t' "$R"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          for f in 04-workers.test 05-repos.test 06-dsh.test 07-identity-tests 08-full-suite; do
+            echo "== $f"; grep -E '^(ℹ|#) (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)' "$L/$f.log" | head -10
+          done | tee -a "$L/99-counts.log"
+          cp "$R" "$GITHUB_STEP_SUMMARY.tsv" 2>/dev/null || true
+          exit 0
+
+      - name: Failing tests (names only, for the summary)
+        if: always()
+        shell: bash
+        run: |
+          L="$RUNNER_TEMP/logs"
+          { echo '#### failing/cancelled test lines'; echo '```'; grep -hE '^\s*(✖|not ok)' "$L"/*.log | sort | uniq -c | sort -rn | head -60; echo '```'; } | tee -a "$GITHUB_STEP_SUMMARY" "$L/98-failing.log"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: logs-${{ matrix.name }}
+          path: ${{ runner.temp }}/logs
+          retention-days: 30
