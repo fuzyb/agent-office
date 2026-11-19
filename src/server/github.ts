@@ -199,6 +199,11 @@ export class GitHub {
     return this.commits.requiredChecks(base);
   }
 
+  /** The head commit of pull request `n` right now, asked of GitHub (not the last sync's). Read-only. */
+  async pullHead(n: number): Promise<string> {
+    return (await this.runGh(['pr', 'view', String(n), '--json', 'headRefOid', '--jq', '.headRefOid'], this.dir)).trim();
+  }
+
   /** The checks of exactly commit `sha`, asked of GitHub by that SHA and kept (see CommitChecks). Read-only. */
   shaChecks(sha: string): Promise<ShaChecks> {
     return this.commits.shaChecks(sha);

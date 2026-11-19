@@ -128,6 +128,13 @@ class FakeGh implements QaGitHub {
   extra = new Map<number, PullExtra>();
   required: string[] | null = ['test'];
   shaCalls: string[] = [];
+  /** Heads GitHub already has that the last sync has not seen; and whether asking fails. */
+  live = new Map<number, string>();
+  headError = false;
+  async pullHead(n: number) {
+    if (this.headError) throw new Error('offline');
+    return this.live.get(n) ?? this.pulls.items.find((p) => p.number === n)?.headRefOid ?? '';
+  }
   /** What GitHub says about a commit asked for by its SHA. */
   bySha = new Map<string, ShaChecks>();
   extras(n: number) {
@@ -257,7 +264,7 @@ test('a worker that did the work, known by its branch and remembered after it go
   await r.qa.onPulls(r.gh.pulls.items);
   assert.deepEqual([stateOf(r, 2).authorsKnown, stateOf(r, 2).authors], [false, []]);
   assert.equal(r.qa.assign(2, SHA1, other.id, 'Ada').ok, true);
-  assert.equal(r.qa.submit(other.id, 2, SHA1, 'approve', 'fine').ok, true);
+  assert.equal((await r.qa.submit(other.id, 2, SHA1, 'approve', 'fine')).ok, true);
   await r.qa.onPulls(r.gh.pulls.items);
   assert.deepEqual([stateOf(r, 2).state, stateOf(r, 2).evidence[0].status], ['needs-review', 'unverifiable']);
   r.qa.attest(2, SHA1, 'approve', 'qa-20261119-xxxxxx', 'imported verdict', 'Ada');
@@ -307,22 +314,65 @@ test('only the worker given a review can report it, once, for that commit, as it
   r.gh.open(pull(2, { headRefName: 'feature-2' }));
   await r.qa.onPulls(r.gh.pulls.items);
   assert.equal(r.qa.assign(1, SHA1, reviewer.id, 'Ada').ok, true);
-  assert.match(r.qa.submit(bystander.id, 1, SHA1, 'approve', 'I say so').message, /only the worker a person gave it to/);
-  assert.match(r.qa.submit(reviewer.id, 2, SHA1, 'approve', 'wrong pr').message, /not given the review of PR #2/);
-  assert.match(r.qa.submit(reviewer.id, 1, SHA2, 'approve', 'wrong commit').message, /not recorded/);
-  assert.match(r.qa.submit(reviewer.id, 1, SHA1, 'lgtm', '').message, /verdict is approve, changes or comment/);
+  assert.match((await r.qa.submit(bystander.id, 1, SHA1, 'approve', 'I say so')).message, /only the worker a person gave it to/);
+  assert.match((await r.qa.submit(reviewer.id, 2, SHA1, 'approve', 'wrong pr')).message, /not given the review of PR #2/);
+  assert.match((await r.qa.submit(reviewer.id, 1, SHA2, 'approve', 'wrong commit')).message, /not recorded/);
+  assert.match((await r.qa.submit(reviewer.id, 1, SHA1, 'lgtm', '')).message, /verdict is approve, changes or comment/);
   assert.equal(r.qa.store.evidence.length, 0, 'none of that was recorded');
-  assert.equal(r.qa.submit(reviewer.id, 1, SHA1, 'approve', 'checked the diff').ok, true);
-  assert.match(r.qa.submit(reviewer.id, 1, SHA1, 'approve', 'again').message, /only the worker a person gave it to/);
+  assert.equal((await r.qa.submit(reviewer.id, 1, SHA1, 'approve', 'checked the diff')).ok, true);
+  assert.match((await r.qa.submit(reviewer.id, 1, SHA1, 'approve', 'again')).message, /only the worker a person gave it to/);
   const e = r.qa.store.evidence[0];
   assert.deepEqual([e.kind, e.reviewerId, e.reviewerName, e.reviewerProvider, e.sha], ['worker', reviewer.id, 'Reviewer', 'codex', SHA1]);
-  // A verdict that arrives after the head moved is kept, and does not count.
-  assert.equal(r.qa.assign(2, SHA1, second.id, 'Ada').ok, true);
-  r.gh.open(pull(2, { headRefOid: SHA2 }));
+});
+
+test('a pull request that changes during review: the diff is pinned to the commit, the head is checked before and after, and a verdict about a commit that is no longer the head is rejected', async (t) => {
+  const author = worker({ name: 'Author', role: 'developer', worktree: { path: 'w', branch: 'feature-1', base: 'x' } });
+  const first = worker({ name: 'First', role: 'reviewer' });
+  const second = worker({ name: 'Second', role: 'qa-engineer' });
+  const r = rig(t, [author, first, second]);
+  r.gh.open(pull(1));
   await r.qa.onPulls(r.gh.pulls.items);
-  assert.equal(r.qa.submit(second.id, 2, SHA1, 'approve', 'late').ok, true);
-  assert.equal(stateOf(r, 2).evidence[0].status, 'stale');
-  assert.equal(stateOf(r, 2).state, 'needs-review');
+  assert.equal(r.qa.assign(1, SHA1, first.id, 'Ada').ok, true);
+  // What the reviewer is told: a diff of exactly that commit, and the head checked before and after. Never the moving pull request.
+  const text = r.prompts[0].text;
+  assert.ok(text.includes(`gh api -H "Accept: application/vnd.github.diff" repos/{owner}/{repo}/compare/main...${SHA1}`), 'the diff is of the pinned commit');
+  assert.equal(text.split('gh pr view 1 --json headRefOid --jq .headRefOid').length - 1, 2, 'the head is checked before and after');
+  assert.ok(!/gh pr diff 1\b|gh pr checkout 1\b/.test(text), 'no command that follows the moving head');
+  assert.match(text, /Do not use \`gh pr diff\` or \`gh pr checkout\`/);
+  // While the reviewer works, the author pushes: GitHub's head moves, and the office has not even synced yet.
+  r.gh.live.set(1, SHA2);
+  const late = await r.qa.submit(first.id, 1, SHA1, 'approve', 'looked fine');
+  assert.equal(late.ok, false);
+  assert.match(late.message, /The head moved to bbbbbbb while you reviewed aaaaaaa/);
+  assert.match(late.message, /needs a review of its own/);
+  assert.equal(r.qa.store.evidence.length, 0, 'the verdict was not recorded, not even as stale evidence');
+  assert.equal(r.qa.store.assignments[0].closed, 'stale');
+  assert.match((await r.qa.submit(first.id, 1, SHA1, 'approve', 'again')).message, /only the worker a person gave it to/, 'and it cannot be answered again');
+  // Once the sync sees the new head, the pull request needs a review of the new commit, and a fresh one can be asked for.
+  r.gh.open(pull(1, { headRefOid: SHA2 }));
+  await r.qa.onPulls(r.gh.pulls.items);
+  assert.deepEqual([stateOf(r, 1).state, stateOf(r, 1).evidence.length, stateOf(r, 1).assigned], ['needs-review', 0, undefined]);
+  const offer = r.qa.offer(1);
+  assert.ok(typeof offer !== 'string' && offer.sha === SHA2 && offer.candidates.some((c) => c.name === 'Second'));
+  assert.equal(r.qa.assign(1, SHA2, second.id, 'Ada').ok, true);
+  assert.ok(r.prompts[1].text.includes(`compare/main...${SHA2}`), 'the new review is pinned to the new commit');
+  // The reviewer of the old commit cannot be heard about the new one, and the new reviewer's verdict counts while the head stays.
+  assert.equal((await r.qa.submit(second.id, 1, SHA1, 'approve', 'wrong commit')).ok, false);
+  assert.equal((await r.qa.submit(second.id, 1, SHA2, 'approve', 'checked it')).ok, true);
+  await r.qa.onPulls(r.gh.pulls.items);
+  assert.deepEqual([stateOf(r, 1).state, stateOf(r, 1).evidence[0].status], ['ready', 'counts']);
+  assert.deepEqual(r.gh.shaCalls, [SHA2], "only the reviewed commit's checks were asked for");
+  // If GitHub cannot say what the head is, nothing is recorded and the review stays open to be reported again.
+  r.gh.open(pull(2));
+  await r.qa.onPulls(r.gh.pulls.items);
+  const third = worker({ name: 'Third', role: 'reviewer' });
+  r.workers.push(third);
+  assert.equal(r.qa.assign(2, SHA1, third.id, 'Ada').ok, true);
+  r.gh.headError = true;
+  assert.match((await r.qa.submit(third.id, 2, SHA1, 'approve', 'x')).message, /could not confirm PR #2's head/);
+  assert.equal(r.qa.store.evidence.filter((e) => e.pr === 2).length, 0);
+  r.gh.headError = false;
+  assert.equal((await r.qa.submit(third.id, 2, SHA1, 'approve', 'x')).ok, true);
 });
 
 test('reviews, assignments and who did the work survive a restart; a damaged file is not trusted', async (t) => {

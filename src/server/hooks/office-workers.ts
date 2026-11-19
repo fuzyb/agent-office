@@ -86,7 +86,7 @@ export async function officeWorkers(ctx: Ctx, req: http.IncomingMessage, res: ht
     const b = (body ?? {}) as { pr?: unknown; sha?: unknown; verdict?: unknown; summary?: unknown };
     const n = typeof b.pr === 'number' ? b.pr : Number(String(b.pr ?? '').replace('#', ''));
     if (!Number.isSafeInteger(n) || n < 1) return send(res, 400, { error: 'Say which pull request: pr' });
-    const r = floor.qa.submit(me.id, n, str(b.sha, 64), str(b.verdict, 16), str(b.summary, 4000));
+    const r = await floor.qa.submit(me.id, n, str(b.sha, 64), str(b.verdict, 16), str(b.summary, 4000));
     if (r.ok) ctx.toastFloor(floor, `🧪 ${who} reported a review of PR #${n}`);
     return send(res, r.ok ? 200 : 403, r.ok ? { ok: true, message: r.message } : { error: r.message });
   }

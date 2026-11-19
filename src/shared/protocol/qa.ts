@@ -68,6 +68,8 @@ export interface QaAssignment {
   at: number;
   /** Set when the verdict came in. */
   evidenceId?: string;
+  /** Set when the head moved before the verdict: that review was about a commit that is no longer the pull request, and is closed unanswered. */
+  closed?: 'stale';
 }
 
 export type EvidenceStatus =

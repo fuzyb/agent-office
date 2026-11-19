@@ -22,6 +22,8 @@ export interface QaGitHub {
   extras(n: number): PullExtra | undefined;
   requiredChecks(base: string): Promise<string[] | null>;
   shaChecks(sha: string): Promise<ShaChecks>;
+  /** The head of the pull request right now, asked of GitHub. */
+  pullHead(n: number): Promise<string>;
 }
 
 export interface QaFloor extends DispatchFloor {
@@ -37,16 +39,20 @@ const id = () => randomBytes(6).toString('hex');
 
 /** The instructions a reviewer gets. Plain text from the facts: it costs nothing to make and nothing to read twice. */
 export function reviewPrompt(pr: { number: number; title: string; url: string; sha: string; base: string }): string {
+  const head = `gh pr view ${pr.number} --json headRefOid --jq .headRefOid`;
   return [
     `Review pull request #${pr.number} “${pr.title}” (${pr.url}) at exactly commit ${pr.sha}.`,
     '',
-    `Read only that commit's diff (\`gh pr diff ${pr.number}\`), check it against the project's rules and tests, and say what you found. Do not merge, push, approve or comment on GitHub, and do not change the code: you are not its author, so your job is to judge it.`,
+    `1. Check the head first: \`${head}\` must print ${pr.sha}. If it prints another commit, stop: the pull request has changed and a verdict about ${pr.sha.slice(0, 7)} would be rejected.`,
+    `2. Read the diff of that commit, pinned to it, not the pull request as it moves: \`gh api -H "Accept: application/vnd.github.diff" repos/{owner}/{repo}/compare/${pr.base}...${pr.sha}\`. Do not use \`gh pr diff\` or \`gh pr checkout\`: they follow the head.`,
+    `3. Check it against the project's rules and tests. Do not merge, push, approve or comment on GitHub, and do not change the code: you are not its author, so your job is to judge it.`,
+    `4. Check the head again (\`${head}\`). If it moved while you reviewed, do not report an approval: the office rejects a verdict about a commit that is no longer the head, and the new commit needs a review of its own.`,
     '',
-    `When you have decided, report it to the office with your own tool, not in a GitHub comment (a comment is not evidence here):`,
+    `Then report it to the office with your own tool, not in a GitHub comment (a comment is not evidence here):`,
     `  office-workers review-submit --pr ${pr.number} --sha ${pr.sha} --verdict approve|changes|comment <<'EOF'`,
     `  …what you checked and found, briefly…`,
     `  EOF`,
-    `(or the MCP tool submit_pr_review). If the pull request's head is no longer ${pr.sha.slice(0, 7)}, stop and say so: this review would be about a different commit.`,
+    `(or the MCP tool submit_pr_review).`,
   ].join('\n');
 }
 
@@ -164,7 +170,7 @@ export class QaService {
     for (const p of open) {
       const facts = this.factsFor(p);
       const asked = this.commits.get(facts.sha);
-      const pending = this.store.assignments.find((a) => a.pr === p.number && a.sha === facts.sha && !a.evidenceId);
+      const pending = this.store.assignments.find((a) => a.pr === p.number && a.sha === facts.sha && !a.evidenceId && !a.closed);
       const a = assess(facts, {
         required: required.get(p.baseRefName) ?? [],
         requiredKnown: required.get(p.baseRefName) != null,
@@ -230,7 +236,7 @@ export class QaService {
     if (typeof a === 'string') return { ok: false, message: a };
     if (a.sha !== sha) return { ok: false, message: `PR #${n} changed since you looked (the head is now ${a.sha.slice(0, 7)}): look again` };
     if (a.evidence.some((e) => e.status === 'counts' && e.kind === 'worker')) return { ok: false, message: `This commit already has a review that counts: no second one is asked for` };
-    const open = this.store.assignments.find((x) => x.pr === n && x.sha === sha && !x.evidenceId);
+    const open = this.store.assignments.find((x) => x.pr === n && x.sha === sha && !x.evidenceId && !x.closed);
     if (open) return { ok: false, message: `${open.workerName} already has the review of this commit` };
     const offer = this.offer(n);
     if (typeof offer === 'string') return { ok: false, message: offer };
@@ -261,11 +267,25 @@ export class QaService {
    * A worker's verdict, through its own authenticated tool call: `workerId` is who the office knows the caller
    * is, from its token. Only the worker a review was given to, and only for the commit it was given for.
    */
-  submit(workerId: string, n: number, sha: string, verdict: string, summary: string): { ok: boolean; message: string } {
+  async submit(workerId: string, n: number, sha: string, verdict: string, summary: string): Promise<{ ok: boolean; message: string }> {
     if (!['approve', 'changes', 'comment'].includes(verdict)) return { ok: false, message: 'verdict is approve, changes or comment' };
-    const given = this.store.assignments.find((x) => x.pr === n && x.workerId === workerId && !x.evidenceId);
+    const given = this.store.assignments.find((x) => x.pr === n && x.workerId === workerId && !x.evidenceId && !x.closed);
     if (!given) return { ok: false, message: `You were not given the review of PR #${n}, or you have answered it: only the worker a person gave it to can report a verdict` };
     if (given.sha !== sha) return { ok: false, message: `You were given the review of ${given.sha.slice(0, 7)}, not ${sha.slice(0, 7)}: a verdict about another commit is not recorded` };
+    // The head is asked of GitHub now, not read from the last sync: the pull request may have moved while the worker reviewed.
+    let head: string;
+    try {
+      head = await this.github.pullHead(n);
+    } catch {
+      return { ok: false, message: `The office could not confirm PR #${n}'s head with GitHub just now, so nothing was recorded: report it again in a moment` };
+    }
+    if (given.evidenceId || given.closed) return { ok: false, message: 'That review was answered in the meantime' };
+    if (head !== sha) {
+      given.closed = 'stale';
+      this.store.save();
+      this.refresh();
+      return { ok: false, message: `The head moved to ${head.slice(0, 7)} while you reviewed ${sha.slice(0, 7)}: this verdict is about a commit that is no longer the pull request, so it is not recorded. The new commit needs a review of its own.` };
+    }
     const w = this.floor.workers.get(workerId);
     const e: QaEvidence = { id: id(), pr: n, sha, kind: 'worker', verdict: verdict as QaEvidence['verdict'], summary: summary.trim().slice(0, 4000), at: Date.now(), reviewerId: workerId, reviewerName: w?.name ?? given.workerName, reviewerProvider: w?.provider ?? given.workerProvider };
     this.store.evidence.push(e);

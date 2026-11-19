@@ -52,8 +52,14 @@ otherwise every check that reported must pass and at least one must.
 **Find a reviewer** lists the idle QA Engineers and Reviewers on this floor, best first with the reasons, and the others with why not. It uses
 [dispatch](dispatch.md): never a busy worker, never another floor, never one on a different account or at its plan limit, never a hire.
 **The author never qualifies.** Admins can **Give the review** to one: it is queued as a held task and given through dispatch, with a short
-fixed prompt naming the pull request and the exact commit. A commit that already has a review that counts, or one out for answer, is not
-given a second.
+fixed prompt naming the pull request and the exact commit. The prompt pins the work to the commit: the head is checked first, the diff is read from GitHub's compare of the base with that
+SHA (never `gh pr diff` or a checkout, which follow the head), and the head is checked again at the end. A commit that already has a
+review that counts, or one out for answer, is not given a second.
+
+**If the pull request changes during the review**, the verdict is rejected: when it is reported, the office asks GitHub for the head right
+then (not the last sync's), and a verdict about a commit that is no longer the head is not recorded, not even as stale evidence. That review
+is closed, and the new commit needs a review of its own (a new offer, a new assignment, pinned to the new SHA). If GitHub cannot be asked, nothing
+is recorded and the worker reports again.
 
 ## Who can do what
 

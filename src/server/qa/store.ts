@@ -55,7 +55,7 @@ export class QaStore {
       }
       for (const a of raw.assignments ?? []) {
         if (typeof a?.id !== 'string' || !Number.isSafeInteger(a.pr) || typeof a.sha !== 'string' || typeof a.workerId !== 'string' || typeof a.taskId !== 'string') continue;
-        this.assignments.push({ id: a.id, pr: a.pr, sha: a.sha, workerId: a.workerId, workerName: str(a.workerName, 64) ?? '', workerProvider: a.workerProvider, taskId: a.taskId, by: str(a.by, 64) ?? '', at: Number(a.at) || 0, ...(typeof a.evidenceId === 'string' ? { evidenceId: a.evidenceId } : {}) });
+        this.assignments.push({ id: a.id, pr: a.pr, sha: a.sha, workerId: a.workerId, workerName: str(a.workerName, 64) ?? '', workerProvider: a.workerProvider, taskId: a.taskId, by: str(a.by, 64) ?? '', at: Number(a.at) || 0, ...(typeof a.evidenceId === 'string' ? { evidenceId: a.evidenceId } : {}), ...(a.closed === 'stale' ? { closed: 'stale' as const } : {}) });
       }
       for (const [n, v] of Object.entries(raw.authors ?? {})) {
         if (Number.isSafeInteger(Number(n)) && Array.isArray(v?.ids)) this.authors.set(Number(n), { ids: v.ids.filter((x) => typeof x === 'string'), names: (v.names ?? []).filter((x) => typeof x === 'string'), providers: v.providers ?? [] });
