@@ -22,7 +22,7 @@ Agents can do the same: `hire_worker` and `office-workers hire` take `name` and 
 
 Press **✏️** in the worker's terminal window (E at its desk), or in the workers list in the sidebar. The window changes its name and its role together, and nothing else: its session keeps running, its worktree and branch stay where they are, its task and its place in the queue carry on, and a message sent to it still reaches it. Everyone on the floor sees a toast saying who renamed whom.
 
-If two people change the same worker at the same moment, the second is told it was changed meanwhile and nothing is overwritten.
+If two people change the same worker at the same moment, the second is told it was changed meanwhile and nothing is overwritten. The window remembers what the worker was when it opened (a frozen copy, never read from the live worker again) and sends that as what it expects to find; the office refuses the whole change when it finds something else.
 
 A board agent (the Issues, PR and Queue agents) has a fixed name and no role. A shell can be renamed, keeps its 🐚, and has no role.
 
@@ -32,9 +32,11 @@ There is no tool for an agent to rename another worker. Agents choose a name whe
 
 Up to 32 characters, in any script: letters, numbers, spaces, emoji (with their joiners and skin tones) and `- – — _ . , ' ’ & + ( )`. `Chief — Galexii`, `José`, `李雷` and `👩‍🔬 Ada` are fine.
 
-Everything else is refused with a message, by the page as you type and again by the office, which is what decides: markup and quotes (`< > "`), shell characters (`` ` $ ; | ``), path characters (`/ \ :`), `@` and `#` (which would mention someone or link an issue in a pull request), brackets, line breaks and invisible or direction-changing characters, more than three accents stacked on a letter, a name that looks like a worker id, the shell mark 🐚, a board agent's name, and a word that mixes Latin with Cyrillic or Greek letters (a way to pass as another worker).
+Everything else is refused with a message, by the page as you type and again by the office, which is what decides: markup and quotes (`< > "`), shell characters (`` ` $ ; | ``), path characters (`/ \ :`), `@` and `#` (which would mention someone or link an issue in a pull request), brackets, line breaks, more than three accents stacked on a letter, a name that looks like a worker id (however it is written: in fullwidth letters, or spaced out), the shell mark 🐚, a board agent's name, and a word that mixes Latin with Cyrillic or Greek letters (a way to pass as another worker).
 
-**Names are unique on a floor.** Two names are the same when only case, spacing around a dash, or a compatibility form of a letter differs (`Chief — Galexii`, `chief-galexii` and `ＣＨＩＥＦ—ＧＡＬＥＸＩＩ` collide). A second one is refused with the name it clashed with, and the pool skips any name someone chose. The same name is free on another floor, and once its worker has gone.
+**Invisible characters** are refused too, because a name with one in it looks like another name and is not. The only ones let through are those that do a job: the joiner inside an emoji sequence (👩‍🔬), the variation selector after an emoji (❤️) or before a keycap, and a zero-width non-joiner between letters of a script that needs one (Persian). A joiner or selector after a Latin letter, a combining grapheme joiner, a Hangul filler, a soft hyphen, a zero-width space and a direction mark are all refused.
+
+**Names are unique on a floor.** Two names are the same when they differ only in case, spacing around a dash, a compatibility form of a letter (fullwidth `Ｐixel`), anything invisible, or a letter of another alphabet drawn exactly like a Latin one (a Cyrillic `а`, `е`, `о`, `р`, `с`, `у`, `х`, a Greek `ο`, `α`…). So `Pixel`, `pixel`, `ＰＩＸＥＬ` and a Cyrillic `асе` against `ace` collide, and so does a name saved by an older office with an invisible character in it, which counts as what it looks like. This is a list of the shapes that really are the same, not a full confusables table: it does not fold digits and letters (`0`/`O`, `1`/`l`), so a name that differs from another only there is still a different name to the office, though it may not look different to a person. A second one is refused with the name it clashed with, and the pool skips any name someone chose. The same name is free on another floor, and once its worker has gone.
 
 A name is drawn as text everywhere (the page builds its elements, never markup), and it is never used as a path: the worker's branch and folder are made once, when it is hired, as `office/<name as plain letters>-<first four of its id>`. A name with no plain letters (`李雷`) gets `office/worker-<id>`. A rename leaves both alone.
 
@@ -58,7 +60,7 @@ A name is drawn as text everywhere (the page builds its elements, never markup),
 
 The ids that have a file in the HQ repository's `roles/` folder use that file's name, so whatever matches work to workers later can map a role id to its brief. A role is a row in `WORKER_ROLES` (`src/shared/worker-identity.ts`) and has no code of its own; to add one, add a row there and the same id to `ROLES` in `bin/office-workers.js` (a test fails until both match).
 
-**A role grants nothing.** Hiring, sending home, merging, reaching another floor and everything else are decided exactly as before, by who is asking and the office's own rules. No server code reads a worker's role to decide anything, and a test fails if one starts to (`tests/worker-identity.test.ts`). A worker called the Engineering Chief has no more access than any other.
+**A role grants nothing.** Hiring, sending home, merging, reaching another floor and everything else are decided exactly as before, by who is asking and the office's own rules. No server code reads a worker's role to decide anything, and a test lists every line that mentions one and fails when that changes, and another runs the real `/office/workers` route with workers of every role and checks that it answers them all the same (`tests/worker-role-label.test.ts`). A worker called the Engineering Chief has no more access than any other.
 
 ## What agents see
 

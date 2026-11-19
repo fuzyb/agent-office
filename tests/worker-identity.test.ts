@@ -480,26 +480,6 @@ test('only a worker on the floor you are on can be changed, found by its id', (t
   assert.equal(ma.get(onA.id)!.name, 'Renamed');
 });
 
-test('a role is a label: nothing on the server decides what a worker may do by reading it', () => {
-  const server = path.join(import.meta.dirname, '..', 'src', 'server');
-  const files: string[] = [];
-  const walk = (dir: string) => {
-    for (const e of readdirSync(dir)) {
-      const p = path.join(dir, e);
-      if (statSync(p).isDirectory()) walk(p);
-      else if (p.endsWith('.ts')) files.push(p);
-    }
-  };
-  walk(server);
-  // Where a worker's own role is read or written: keeping it, saving it, listing it, saying so. A new place is a place to look at.
-  const allowed = new Set(['workers/identity.ts', 'workers/persist.ts', 'office-workers.ts', 'ws/handlers/workers.ts']);
-  const reads = files.filter((f) => /\b(workerRole|shownRole|savedRole)\b|\.info\.role\b/.test(readFileSync(f, 'utf8'))).map((f) => path.relative(server, f).split(path.sep).join('/'));
-  for (const f of reads) assert.ok(allowed.has(f), `${f} reads a worker's role: it is only a label (see shared/worker-identity.ts), so don't let it decide anything`);
-  // The hire route's own checks do not take the asker's role into account.
-  const hook = readFileSync(path.join(server, 'hooks', 'office-workers.ts'), 'utf8');
-  assert.ok(!/(?<!ask)\.role\b/.test(hook.replace(/\/\/.*$/gm, '')), 'hooks/office-workers.ts decides by role');
-});
-
 test('a worker comes back after a restart with the same id, name, role and worktree', (t) => {
   const f = fixture(t);
   const w = f.manager();

@@ -4,7 +4,7 @@
 import './identity.css';
 import { DESK_BY_ID } from '../../shared/layout';
 import type { WorkerInfo } from '../../shared/protocol';
-import { DEFAULT_ROLE, NAME_MAX, SHELL_MARK, WORKER_ROLES, nameKey, parseWorkerName, roleLabel, workerRole } from '../../shared/worker-identity';
+import { DEFAULT_ROLE, NAME_MAX, WORKER_ROLES, identityRequest, nameKey, parseWorkerName, plainName, roleLabel, workerRole, type SeenWorker } from '../../shared/worker-identity';
 import type { Net } from '../net';
 import { store } from '../state';
 import { h, openModal, toast } from './dom';
@@ -32,8 +32,6 @@ export interface IdentityFieldOptions {
   noRole?: boolean;
 }
 
-/** A worker's name without a shell's mark. */
-const plainName = (name: string) => name.replace(new RegExp(`\\s*${SHELL_MARK}$`, 'u'), '');
 
 /** Whether a worker on this floor already has this name, as far as this page knows. */
 const holder = (name: string, except?: string): WorkerInfo | undefined => [...store.workers.values()].find((w) => w.id !== except && nameKey(w.name) === nameKey(name));
@@ -110,9 +108,11 @@ export function openIdentityDialog(net: Net, workerId: string) {
   const w = store.workers.get(workerId);
   if (!w) return;
   if (DESK_BY_ID.get(w.deskId)?.station) return void toast("A board agent's name is fixed", 'warn');
-  const shell = w.kind === 'shell';
-  const shown = plainName(w.name);
-  const fields = identityFields({ id: 'identity', name: shown, role: workerRole(w), required: true, self: w.id, noRole: shell });
+  // What it is as this window opens, kept as plain values: what is sent says it saw this, and never reads the live worker again.
+  const seen: SeenWorker = Object.freeze({ id: w.id, kind: w.kind, name: w.name, role: workerRole(w) });
+  const shell = seen.kind === 'shell';
+  const shown = plainName(seen.name);
+  const fields = identityFields({ id: 'identity', name: shown, role: seen.role, required: true, self: seen.id, noRole: shell });
   const cancel = h('button.btn', { type: 'button' }, 'Never mind');
   const save = h('button.btn.primary', { type: 'submit' }, 'Save');
   const title = `✏️ Rename ${shown}`;
@@ -129,14 +129,10 @@ export function openIdentityDialog(net: Net, workerId: string) {
   form.addEventListener('submit', (e) => {
     e.preventDefault();
     if (!fields.valid()) return;
-    const name = fields.name();
-    const role = fields.role();
-    const renamed = name !== undefined && name !== shown;
-    const reroled = !shell && role !== workerRole(w);
-    if (!renamed && !reroled) return modal.close();
+    // `expect` is what this window opened on: if someone changed the worker meanwhile, the office applies neither.
+    const ask = identityRequest(seen, { name: fields.name(), role: fields.role() });
     modal.close();
-    // `expect` is what this page showed: if someone changed it meanwhile, the office applies neither.
-    net.send({ t: 'worker.identity', workerId: w.id, ...(renamed ? { name } : {}), ...(reroled ? { role } : {}), expect: { name: w.name, ...(shell ? {} : { role: workerRole(w) }) } });
+    if (ask) net.send(ask);
   });
   setTimeout(() => {
     fields.focus();

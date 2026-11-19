@@ -1,0 +1,51 @@
+{
+ "hooks/office-workers.ts": [
+  "const r = floor.workers.spawn(desk, who, ask.prompt, worktree, 'agent', provider, ask.model, ask.effort, undefined, owner, [], undefined, { name: ask.name, role: ask.role });"
+ ],
+ "office-workers.ts": [
+  "role?: string;",
+  "...(w.kind === 'agent' && !seat?.station ? { role: workerRole(w), roleLabel: roleLabel(workerRole(w)) } : {}),",
+  "role?: string;",
+  "const role = given(b.role) === undefined ? undefined : parseWorkerRole(b.role);",
+  "if (role && 'error' in role) return role.error;",
+  "...(role ? { role: role.role } : {}),"
+ ],
+ "workers/identity.ts": [
+  "role?: unknown;",
+  "expect?: { name?: string; role?: string };",
+  "was: { name: string; role: string };",
+  "changed: ('name' | 'role')[];",
+  "const BOARD_FIXED = \"A board agent's name and role are fixed\";",
+  "pick(asked: { name?: unknown; role?: unknown } | undefined, kind: WorkerKind, board: boolean, pool: readonly string[], fixed?: string): { name: string; role?: string } | string {",
+  "let role: string | undefined;",
+  "const [wantName, wantRole] = [given(asked?.name), given(asked?.role)];",
+  "if (kind === 'shell') return 'A shell has no role';",
+  "role = parsed.role;",
+  "return { name, role: kind === 'agent' && !board ? (role ?? DEFAULT_ROLE) : undefined };",
+  "if (change.name === undefined && change.role === undefined) return 'Give a new name or a new role';",
+  "const was = { name: info.name, role: workerRole(info) };",
+  "if ((expect?.name !== undefined && expect.name !== was.name) || (expect?.role !== undefined && expect.role !== was.role)) {",
+  "let role: string | undefined;",
+  "if (change.role !== undefined) {",
+  "if (shell) return 'A shell has no role';",
+  "const parsed = parseWorkerRole(change.role);",
+  "role = parsed.role;",
+  "if (role !== undefined && role !== was.role) {",
+  "info.role = role;",
+  "changed.push('role');"
+ ],
+ "workers/manager.ts": [
+  "spawn(deskId: string, by: string, prompt?: string, worktree = false, kind: WorkerKind = 'agent', provider?: AgentProvider, model?: string, effort?: AgentEffort, meeting?: { id: string; worktree?: WorkerInfo['worktree'] }, owner?: string, repos: RepoSource[] = [], via?: 'herald', asked?: { name?: unknown; role?: unknown }): WorkerInfo | string {",
+  "const { name, role } = picked;",
+  "...(role ? { role } : {}),"
+ ],
+ "workers/persist.ts": [
+  "role: info.role,",
+  "role: s.kind === 'shell' || DESK_BY_ID.get(s.deskId)?.station ? undefined : (savedRole(s.role) ?? DEFAULT_ROLE),"
+ ],
+ "ws/handlers/workers.ts": [
+  "const r = floor.workers.spawn(str(msg.deskId, 32), who, str(msg.prompt, 20000) || undefined, msg.worktree === true, kind, msg.provider, model, effort, undefined, c.accountId, repos, msg.via === 'herald' ? 'herald' : undefined, { name: given(msg.name), role: given(msg.role) });",
+  "const r = floor.workers.identity.update(wid, { name: msg.name, role: msg.role, expect: { name: typeof seen.name === 'string' ? seen.name : undefined, role: typeof seen.role === 'string' ? seen.role : undefined } });",
+  "const said = [r.changed.includes('name') && `renamed ${r.was.name} to ${r.info.name}`, r.changed.includes('role') && `gave ${r.info.name} the ${roleLabel(r.info.role ?? '')} role`].filter(Boolean).join(' and ');"
+ ]
+}
