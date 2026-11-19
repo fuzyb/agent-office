@@ -1,0 +1,145 @@
+name: CI
+
+# Checks every pull request and every push to main. It can read the repository and nothing else:
+# no write permission, no secrets, no publishing, no deployment. Publishing is a separate, manual
+# workflow (release.yml) that needs the owner.
+
+on:
+  pull_request:
+    paths:
+      - 'src/**'
+      - 'bin/**'
+      - 'tests/**'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'tsconfig*.json'
+      - 'vite.config.ts'
+      - 'install.sh'
+      - '.github/workflows/ci.yml'
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+# No permission at all unless a job asks for one (both jobs ask for read-only contents).
+permissions: {}
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build, typecheck and test (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    steps:
+      # Actions are pinned to a commit: checkout v7, setup-node v7, upload-artifact v7.0.2.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          persist-credentials: false # the repository's code never gets to see a token
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Environment
+        run: |
+          echo "commit: $(git rev-parse HEAD)"; uname -sr; node -v; npm -v
+          echo "event: $GITHUB_EVENT_NAME  ref: $GITHUB_REF"
+
+      - name: Install and build
+        run: npm ci # its prepare script builds the client and the server
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        timeout-minutes: 20
+        run: |
+          mkdir -p "$RUNNER_TEMP/logs"
+          set -o pipefail
+          npm test 2>&1 | tee "$RUNNER_TEMP/logs/test.log"
+
+      - name: Summary of the test run
+        if: always()
+        run: |
+          log="$RUNNER_TEMP/logs/test.log"
+          {
+            echo '### Test run'
+            if [ -f "$log" ]; then
+              echo '```'
+              grep -E '^(ℹ|#) (tests|suites|pass|fail|cancelled|skipped|todo|duration_ms)' "$log" || echo "(no totals in the log: the run stopped early)"
+              echo '```'
+              if grep -qE '^\s*(✖|not ok)' "$log"; then
+                echo 'Failing tests:'; echo '```'; grep -E '^\s*(✖|not ok)' "$log" | sort -u | head -50; echo '```'
+              fi
+            else
+              echo "The tests did not start: see the failing step above."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        if: always()
+        with:
+          name: test-log
+          path: ${{ runner.temp }}/logs
+          if-no-files-found: ignore
+          retention-days: 14
+
+  package-smoke:
+    name: Pack it and install the pack with install.sh (Ubuntu)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          fetch-depth: 0 # the version counts the commits
+          persist-credentials: false
+
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install and build
+        run: npm ci
+
+      - name: Pack (nothing is published)
+        id: pack
+        run: |
+          version="$(node -p 'require("./package.json").version.split(".").slice(0, 2).join(".")').$(git rev-list --count HEAD)"
+          npm version "$version" --no-git-tag-version --allow-same-version
+          npm pkg delete scripts.prepare # it's built already, and installs don't have the build tools
+          cp package-lock.json npm-shrinkwrap.json
+          npm pkg set 'files[]=npm-shrinkwrap.json'
+          npm pack --ignore-scripts
+          mv "agent-office-$version.tgz" agent-office.tgz
+          tar -tzf agent-office.tgz | grep -qx 'package/npm-shrinkwrap.json'
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Install it with install.sh and start it (on this runner only)
+        env:
+          AGENT_OFFICE_TARBALL: ${{ github.workspace }}/agent-office.tgz
+          AGENT_OFFICE_INSTALL_DIR: ${{ runner.temp }}/install
+          AGENT_OFFICE_BIN_DIR: ${{ runner.temp }}/bin
+          AGENT_OFFICE_HOME: ${{ runner.temp }}/office
+          AGENT_OFFICE_INSTALL_ONLY: '1'
+        run: |
+          bash install.sh
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/bin/agent-office" --host 127.0.0.1 --port 4700 --password ci > office.log 2>&1 &
+          office=$!
+          for _ in $(seq 60); do
+            code=$(curl -s -o /dev/null -w '%{http_code}' http://127.0.0.1:4700/login.html || true)
+            [ "$code" = 200 ] && break
+            sleep 1
+          done
+          cat office.log
+          [ "$code" = 200 ] || { echo "the installed office didn't answer (last status: $code)"; exit 1; }
+          grep -qx "v${{ steps.pack.outputs.version }}" install/current
+          kill -INT "$office"
