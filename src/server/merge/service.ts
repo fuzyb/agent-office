@@ -15,7 +15,7 @@ import type { GhPull } from '../../shared/protocol.js';
 import type { PrAssessment, QaViewState } from '../../shared/protocol/qa.js';
 import type { PullExtra, ShaChecks } from '../gh-checks.js';
 import type { MergeOps } from '../gh-merge.js';
-import { FloorMergeStore, type MergePolicyStore } from './store.js';
+import { FloorMergeStore, PolicyWriteError, type MergePolicyStore } from './store.js';
 
 /** What merging needs of QA: where each pull request stands, and the same worked out again now, from GitHub. */
 export interface MergeQaSource {
@@ -120,6 +120,15 @@ export class MergeService {
     this.store.add({ at: Date.now(), repo: this.repo(), kind, by, ...e });
   }
 
+  /** For a change that makes things safer: if the record cannot be written, the change still stands. */
+  private tryWrite(kind: AuditKind, by: string, e: Partial<AuditEntry>) {
+    try {
+      this.write(kind, by, e);
+    } catch {
+      // the stop or the refusal is what matters; the record is told in the message
+    }
+  }
+
   /** A decision is written once for each situation, not at every sync. */
   private decide(n: number, sha: string, ok: boolean, reasons: string[]) {
     const key = `${n}@${sha}|${ok}|${reasons.join('|')}`;
@@ -135,8 +144,14 @@ export class MergeService {
     const repo = this.d.repo();
     if (!repo) return { ok: false, message: 'This floor has no GitHub repository, so there is nothing to switch on' };
     if (input.mode === 'off') {
-      this.d.policy.set(repo, undefined);
-      this.write('policy', by, { ok: true, reasons: ['turned off'] });
+      try {
+        this.d.policy.set(repo, undefined);
+      } catch (e) {
+        this.tryWrite('policy', by, { ok: false, reasons: ['turned off in the running office; could not be saved'] });
+        this.push();
+        return { ok: false, message: e instanceof PolicyWriteError ? e.message : 'Automatic merging is off in the running office, but the change could not be saved' };
+      }
+      this.tryWrite('policy', by, { ok: true, reasons: ['turned off'] });
       this.push();
       return { ok: true, message: `Automatic merging is off for ${repo}` };
     }
@@ -153,7 +168,12 @@ export class MergeService {
     if (badGlob) return { ok: false, message: `“${badGlob}” is not a path pattern it accepts (no “everything”, no “..”)` };
     const clamp = (v: unknown, lo: number, hi: number, d: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.floor(v))) : d);
     const policy: RepoMergePolicy = { mode: input.mode, method: method as RepoMergePolicy['method'], bases, maxChangedLines: clamp(input.maxChangedLines, 1, 5000, DEFAULT_MAX_LINES), maxFiles: clamp(input.maxFiles, 1, 100, DEFAULT_MAX_FILES), extraLowRisk: extra.slice(0, 20), authorization: authorization.slice(0, 300), authorizedBy: by, authorizedAt: Date.now() };
-    this.d.policy.set(repo, policy);
+    try {
+      this.d.policy.set(repo, policy);
+    } catch (e) {
+      this.tryWrite('policy', by, { ok: false, reasons: ['not switched on: the policy could not be saved'] });
+      return { ok: false, message: e instanceof PolicyWriteError ? e.message : 'The policy could not be saved, so it was not switched on' };
+    }
     this.write('policy', by, { ok: true, reasons: [`mode ${policy.mode}, ${policy.method}, into ${bases.join(', ')}`, `authorization: ${policy.authorization}`] });
     this.push();
     return { ok: true, message: `Automatic merging is ${policy.mode === 'auto' ? 'on' : 'on, with your approval of each commit,'} for ${repo}` };
@@ -165,15 +185,27 @@ export class MergeService {
   }
 
   stop(by: string, reason?: string): { ok: boolean; message: string } {
-    this.d.policy.stop(by, reason);
-    this.write('stop', by, { ok: true, reasons: reason ? [reason] : [] });
+    try {
+      this.d.policy.stop(by, reason);
+    } catch (e) {
+      // It is stopped in the running office either way; what could not be done is making it survive a restart.
+      this.tryWrite('stop', by, { ok: false, reasons: [`stopped in the running office; could not be saved${reason ? `: ${reason}` : ''}`] });
+      this.push();
+      return { ok: false, message: e instanceof PolicyWriteError ? e.message : 'The stop is on in the running office, but it could not be saved' };
+    }
+    this.tryWrite('stop', by, { ok: true, reasons: reason ? [reason] : [] });
     this.push();
     return { ok: true, message: 'Emergency stop: no pull request is merged automatically until an admin resumes it' };
   }
 
   resume(by: string): { ok: boolean; message: string } {
     if (!this.d.policy.stopped) return { ok: true, message: 'It was not stopped' };
-    this.d.policy.resume();
+    try {
+      this.d.policy.resume();
+    } catch (e) {
+      this.tryWrite('blocked', by, { ok: false, reasons: ['could not resume: the change could not be saved'] });
+      return { ok: false, message: e instanceof PolicyWriteError ? e.message : 'It could not be resumed, so it stays stopped' };
+    }
     this.write('resume', by, { ok: true });
     this.push();
     return { ok: true, message: 'Resumed' };
@@ -255,6 +287,12 @@ export class MergeService {
     if (this.inFlight.has(key)) return { merged: false, message: 'duplicate: an attempt for this commit is already running' };
     if ((this.store.attempts.get(key) ?? 0) >= MAX_ATTEMPTS) return refuse([`gave up after ${MAX_ATTEMPTS} attempts at this commit: a person looks at it`]);
     this.inFlight.add(key);
+    // The policy and the stop as they are when this begins. If either changes before the merge call, even if it changes back (a
+    // stop and then a resume), this attempt is void: the world it checked is not the world it would merge in.
+    const rev = this.d.policy.revision;
+    const approvedAt = this.store.approvals.get(n)?.at;
+    const moved = () => this.d.policy.revision !== rev;
+    const MOVED = ['the policy or the emergency stop changed during verification: this attempt is void'];
     try {
       this.decide(n, sha, true, [...c.reasons, `policy: ${policy.mode}, ${policy.method}`]);
       this.write('attempt', 'office', { pr: n, sha, reasons: ['revalidating before merging'] });
@@ -266,6 +304,7 @@ export class MergeService {
       } catch (e) {
         return refuse([`could not read the pull request from GitHub: ${(e as Error).message.slice(0, 120)}`]);
       }
+      if (moved()) return refuse(MOVED);
       if (fresh.repo.toLowerCase() !== this.repo().toLowerCase()) return refuse([`it belongs to ${fresh.repo || 'an unknown repository'}, not ${this.repo()}`]);
       if (fresh.state !== 'OPEN' || fresh.draft) return refuse([fresh.draft ? 'it is a draft' : `it is ${fresh.state.toLowerCase()}`]);
       if (fresh.head !== sha) return refuse([`the head moved to ${fresh.head.slice(0, 7)} during verification; everything about ${sha.slice(0, 7)} is void`]);
@@ -277,6 +316,7 @@ export class MergeService {
       } catch {
         return refuse(['could not confirm the office may merge here']);
       }
+      if (moved()) return refuse(MOVED);
       if (!canMerge) return refuse(['the GitHub login the office runs as may not merge in this repository']);
       let required: string[] | null;
       try {
@@ -284,6 +324,7 @@ export class MergeService {
       } catch {
         required = null;
       }
+      if (moved()) return refuse(MOVED);
       if (required === null || required.length === 0) return refuse([`${fresh.base} has no readable branch protection with required checks, so GitHub would not enforce them: a person merges this`]);
       if (fresh.mergeable !== 'MERGEABLE' || fresh.mergeState !== 'CLEAN') return refuse([`GitHub does not call it mergeable (${fresh.mergeable}, ${fresh.mergeState}): the branch's rules or its state say no, and the office does not get round them`]);
       // 2. QA, worked out again now: the checks of exactly this commit, and an independent review of exactly this commit.
@@ -293,13 +334,21 @@ export class MergeService {
       } catch {
         return refuse(['could not confirm the checks and the review of this commit']);
       }
+      if (moved()) return refuse(MOVED);
       if (!again || again.sha !== sha) return refuse(['the head moved while the review and checks were confirmed']);
       if (again.state !== 'ready') return refuse([`not ready any more: ${again.state}${again.reasons[0] ? ` (${again.reasons[0]})` : ''}`]);
       if (!again.evidence.some((e) => e.status === 'counts' && e.sha === sha)) return refuse(['no independent review of this exact commit']);
       // 3. The last look, with nothing awaited between it and the merge call: stop, gate, policy, approval.
+      if (moved()) return refuse(MOVED);
       const last = this.active();
       if (typeof last === 'string') return refuse([`stopped before merging: ${last}`]);
-      if (last.policy.mode === 'approve' && this.store.approvals.get(n)?.sha !== sha) return refuse(['the approval was withdrawn']);
+      // The allowlist and the policy as they are NOW, not as they were: same bases and method, and the approval is the one that was there.
+      if (!last.policy.bases.includes(fresh.base)) return refuse([`${fresh.base} is no longer one of the branches the policy covers`]);
+      if (last.policy.mode === 'approve') {
+        const a = this.store.approvals.get(n);
+        if (!a || a.sha !== sha) return refuse(['the approval was withdrawn']);
+        if (a.at !== approvedAt) return refuse(['the approval changed during verification: this attempt is void']);
+      }
       this.write('merging', 'office', { pr: n, sha, reasons: [`asking GitHub to merge (${last.policy.method}, matching head ${sha.slice(0, 7)})`] });
       const done = this.d.ops.merge(n, sha, last.policy.method);
       try {

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import type http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
@@ -12,7 +12,7 @@ import type { FreshPull } from '../src/server/gh-merge.js';
 import { officeWorkers } from '../src/server/hooks/office-workers.js';
 import { gateOpen } from '../src/server/merge/gate.js';
 import { MergeService } from '../src/server/merge/service.js';
-import { FloorMergeStore, MergePolicyStore } from '../src/server/merge/store.js';
+import { FloorMergeStore, MergePolicyStore, realIo, type PolicyIo } from '../src/server/merge/store.js';
 import { QaService, type QaFloor, type QaGitHub } from '../src/server/qa/service.js';
 import { TaskQueue, type QueueEvents, type QueueWorkers } from '../src/server/queue.js';
 import { mergeHandlers } from '../src/server/ws/handlers/merge.js';
@@ -53,18 +53,25 @@ class FakeGh implements QaGitHub {
   bySha = new Map<string, ShaChecks>();
   live = new Map<number, string>();
   freshAsks = 0;
+  /** Runs at the k-th time the office asks GitHub something fresh, so a test can change the world at exactly that step. */
+  freshHook?: { at: number; fn: () => void };
+  private tick() {
+    this.freshAsks++;
+    if (this.freshHook && this.freshAsks === this.freshHook.at) this.freshHook.fn();
+  }
   extras(n: number) {
     return this.extra.get(n);
   }
   async requiredChecks(_base: string, fresh?: boolean) {
-    if (fresh) this.freshAsks++;
+    if (fresh) this.tick();
     return this.required;
   }
   async shaChecks(sha: string, fresh?: boolean) {
-    if (fresh) this.freshAsks++;
+    if (fresh) this.tick();
     return this.bySha.get(sha) ?? { sha, checks: [pass('test')], exact: true, at: Date.now() };
   }
   async pullHead(n: number) {
+    this.tick();
     return this.live.get(n) ?? this.pulls.items.find((p) => p.number === n)?.headRefOid ?? '';
   }
   open(n: number, o: { sha?: string; files?: string[]; lines?: number; fork?: boolean; base?: string } = {}) {
@@ -90,7 +97,9 @@ class FakeOps {
     this.onPull?.();
     return { ...this.pulls.get(n)! };
   }
+  onCanMerge?: () => void;
   async canMerge() {
+    this.onCanMerge?.();
     return this.canMergeResult;
   }
   async merge(n: number, sha: string, method: string) {
@@ -506,7 +515,7 @@ test('the emergency stop halts everything at once, also in the middle of an atte
   m.ops.onPull = () => void m.merge.stop('Guest', 'pressed in the middle');
   assert.equal((await m.merge.attempt(7)).merged, false);
   assert.equal(m.ops.merges.length, 0);
-  assert.match(m.audit().at(-1)!.reasons![0], /stopped before merging: the emergency stop is on/);
+  assert.match(m.audit().at(-1)!.reasons![0], /the policy or the emergency stop changed during verification: this attempt is void/);
   // And while it is on, nothing can even be approved.
   const approve = rig(t);
   approve.merge.setPolicy('Owner', { ...policyInput, mode: 'approve' });
@@ -609,4 +618,224 @@ test('the merge code cannot bypass, force, change settings, wait on a timer or c
   const names = readdirSync(path.join(dir, 'server', 'merge')).sort();
   assert.deepEqual(names, ['gate.ts', 'service.ts', 'store.ts']);
   assert.ok(statSync(path.join(dir, 'server', 'gh-merge.ts')).isFile());
+});
+
+// --- Races: the policy or the stop changing while an attempt is being verified ------------------------------------------------------------
+
+test('any change to the policy or the stop during verification, even a stop followed by a resume, voids that attempt at every step', async (t) => {
+  // The k-th fresh question to GitHub is: 1 branch protection, 2 the head, 3 protection again, 4 the checks of the commit.
+  const places: [string, (r: Rig, fire: () => void) => void][] = [
+    ['reading the pull request', (r, fire) => void (r.ops.onPull = fire)],
+    ['asking about permission', (r, fire) => void (r.ops.onCanMerge = fire)],
+    ['asking for branch protection', (r, fire) => void (r.gh.freshHook = { at: 1, fn: fire })],
+    ['confirming the head', (r, fire) => void (r.gh.freshHook = { at: 2, fn: fire })],
+    ['asking for the checks of the commit', (r, fire) => void (r.gh.freshHook = { at: 4, fn: fire })],
+  ];
+  const changes: [string, (r: Rig) => void][] = [
+    ['a stop and then a resume', (r) => (r.merge.stop('A', 'oops'), r.merge.resume('B'))],
+    ['the policy rewritten identically', (r) => void r.merge.setPolicy('Owner', policyInput)],
+    ['switched off and on again', (r) => (r.merge.setPolicy('Owner', { mode: 'off' }), r.merge.setPolicy('Owner', policyInput))],
+    ['switched off', (r) => void r.merge.setPolicy('Owner', { mode: 'off' })],
+    ['a stop', (r) => void r.merge.stop('A')],
+    ['the branches changed', (r) => void r.merge.setPolicy('Owner', { ...policyInput, bases: ['release'] })],
+  ];
+  for (const [where, hook] of places) {
+    for (const [what, change] of changes) {
+      const r = rig(t);
+      on(r);
+      await ready(r);
+      let fired = 0;
+      hook(r, () => void (fired++ === 0 && change(r)));
+      const first = await r.merge.attempt(7);
+      assert.equal(fired > 0, true, `${where}: the change happened`);
+      assert.equal(first.merged, false, `${where}, ${what}: the attempt that was under way does not go on`);
+      assert.equal(r.ops.merges.length, 0, `${where}, ${what}: nothing was merged by it`);
+      assert.match(r.audit().at(-1)!.reasons![0], /changed during verification: this attempt is void/, `${where}, ${what}`);
+    }
+  }
+  // Once the world is what it was (stop and resume, the same policy again), a NEW attempt starts over from the beginning and may merge.
+  const r = rig(t);
+  on(r);
+  await ready(r);
+  r.ops.onPull = () => void (r.ops.onPull = undefined, r.merge.stop('A'), r.merge.resume('B'));
+  assert.equal((await r.merge.attempt(7)).merged, false);
+  assert.equal(r.ops.merges.length, 0);
+  assert.equal((await r.merge.attempt(7)).merged, true, 'a fresh attempt, with everything asked again');
+  assert.equal(r.ops.merges.length, 1);
+});
+
+test('an approval withdrawn and given again during verification voids the attempt too, and the allowlist is read again at the end', async (t) => {
+  const r = rig(t);
+  r.merge.setPolicy('Owner', { ...policyInput, mode: 'approve' });
+  await ready(r);
+  r.merge.store.approvals.set(7, { pr: 7, sha: SHA1, by: 'Ada', at: 1 });
+  r.ops.onPull = () => void (r.ops.onPull = undefined, r.merge.store.approvals.set(7, { pr: 7, sha: SHA1, by: 'Bob', at: 2 }));
+  assert.equal((await r.merge.attempt(7)).merged, false);
+  assert.match(r.audit().at(-1)!.reasons![0], /the approval changed during verification/);
+  assert.equal(r.ops.merges.length, 0);
+  // The approval now standing is the one acted on next time.
+  assert.equal((await r.merge.attempt(7)).merged, true);
+  assert.equal(r.ops.merges.length, 1);
+  // A repository taken off the allowlist while it verifies is not merged into.
+  const o = rig(t);
+  on(o);
+  await ready(o);
+  o.ops.onCanMerge = () => void o.policy.repos.clear();
+  assert.equal((await o.merge.attempt(7)).merged, false);
+  assert.equal(o.ops.merges.length, 0);
+});
+
+// --- Persistence: a write that fails fails closed -------------------------------------------------------------------------------------------
+
+/** The real disk, until told otherwise: then these files fail. */
+function flaky(fail: { write?: (file: string) => boolean; remove?: (file: string) => boolean } = {}): PolicyIo & { fail: typeof fail } {
+  const io = {
+    fail,
+    read: realIo.read,
+    exists: realIo.exists,
+    write(file: string, text: string) {
+      if (io.fail.write?.(file)) throw new Error('disk full');
+      realIo.write(file, text);
+    },
+    remove(file: string) {
+      if (io.fail.remove?.(file)) throw new Error('read-only');
+      realIo.remove(file);
+    },
+  };
+  return io;
+}
+const isMain = (f: string) => f.endsWith('automerge.json');
+const anyPolicyFile = (f: string) => f.includes('automerge.json');
+
+function flakyRig(t: { after(fn: () => void): void }) {
+  const officeDir = tmp('office-flaky');
+  const io = flaky();
+  const r = rig(t, { officeDir, policy: new MergePolicyStore(officeDir, io) });
+  return { r, io, officeDir };
+}
+
+test('a stop that cannot be saved is not reported as saved, still stops, and a restart cannot bring back what was on', async (t) => {
+  // The write fails but the older file can be removed: after a restart there is no older policy to bring back.
+  {
+    const { r, io, officeDir } = flakyRig(t);
+    on(r);
+    await ready(r);
+    const rev = r.policy.revision;
+    io.fail.write = isMain;
+    const stop = r.merge.stop('Ada', 'something is wrong');
+    assert.equal(stop.ok, false, 'not reported as a success');
+    assert.match(stop.message, /could not be saved to disk/);
+    assert.ok(r.policy.revision > rev, 'an attempt under way would be voided');
+    assert.ok(r.merge.state().stopped, 'still stopped in the running office');
+    assert.equal((await r.merge.attempt(7)).merged, false);
+    assert.equal(r.ops.merges.length, 0);
+    const after = new MergePolicyStore(officeDir);
+    assert.equal(after.repos.size, 0, 'the enabled policy did not come back');
+    assert.ok(after.stopped);
+  }
+  // The older file cannot be removed either, but a marker can be written: a restart finds it and starts stopped with nothing on.
+  {
+    const { r, io, officeDir } = flakyRig(t);
+    on(r);
+    io.fail.write = isMain;
+    io.fail.remove = (f) => isMain(f);
+    assert.equal(r.merge.stop('Ada').ok, false);
+    assert.match(readFileSync(path.join(officeDir, 'automerge.json'), 'utf8'), /"mode": "auto"/, 'the older, enabled policy is still in the file');
+    const after = new MergePolicyStore(officeDir);
+    assert.equal(after.repos.size, 0, 'but a restart does not use it');
+    assert.match(after.stopped!.reason!, /could not be saved last time/);
+  }
+  // Nothing can be written at all: it is said not to be saved, and the running office is stopped; there is no honest claim beyond that.
+  {
+    const { r, io } = flakyRig(t);
+    on(r);
+    io.fail.write = anyPolicyFile;
+    io.fail.remove = anyPolicyFile;
+    const stop = r.merge.stop('Ada');
+    assert.equal(stop.ok, false);
+    assert.ok(r.merge.state().stopped);
+    assert.equal((await r.merge.attempt(7)).merged, false);
+  }
+});
+
+test('switching off that cannot be saved is reported, takes effect, and does not leave the older policy to come back; switching on that cannot be saved does not switch on', async (t) => {
+  const { r, io, officeDir } = flakyRig(t);
+  on(r);
+  await ready(r);
+  io.fail.write = isMain;
+  const off = r.merge.setPolicy('Owner', { mode: 'off' });
+  assert.equal(off.ok, false);
+  assert.match(off.message, /could not be saved to disk/);
+  assert.equal(r.policy.repos.size, 0, 'off in the running office');
+  assert.ok(r.merge.state().stopped, 'and stopped until an admin resumes it');
+  assert.equal((await r.merge.attempt(7)).merged, false);
+  const after = new MergePolicyStore(officeDir);
+  assert.equal(after.repos.size, 0, 'the older enabled policy did not come back after a restart');
+  assert.ok(after.stopped);
+  // Resuming needs the disk: while it fails, it stays stopped and says so.
+  assert.equal(r.merge.resume('Admin').ok, false);
+  assert.ok(r.merge.state().stopped);
+  // The disk comes back: an admin resumes, the marker is gone, and nothing is on until it is switched on again.
+  io.fail.write = undefined;
+  assert.equal(r.merge.resume('Admin').ok, true);
+  assert.equal(r.merge.state().stopped, undefined);
+  assert.equal(new MergePolicyStore(officeDir).stopped, undefined);
+  assert.equal(new MergePolicyStore(officeDir).repos.size, 0);
+  assert.equal(r.merge.setPolicy('Owner', policyInput).ok, true);
+
+  // Switching ON (and changing a policy that is on) is saved before it counts.
+  const b = flakyRig(t);
+  b.io.fail.write = isMain;
+  const refused = b.r.merge.setPolicy('Owner', policyInput);
+  assert.equal(refused.ok, false);
+  assert.match(refused.message, /not switched on and nothing changed/);
+  assert.equal(b.r.policy.repos.size, 0);
+  assert.equal(new MergePolicyStore(b.officeDir).repos.size, 0);
+  b.io.fail.write = undefined;
+  on(b.r);
+  b.io.fail.write = isMain;
+  assert.equal(b.r.merge.setPolicy('Owner', { ...policyInput, method: 'rebase' }).ok, false);
+  assert.equal(b.r.policy.get('o/r')!.method, 'squash', 'the policy that was authorized is what stays, in memory and on disk');
+  assert.equal(new MergePolicyStore(b.officeDir).get('o/r')!.method, 'squash');
+  assert.equal(b.r.policy.stopped, undefined, 'a failed loosening is not a lockdown');
+});
+
+test('a failed resume stays stopped, also across a restart; a marker at startup means nothing is on until an admin switches it on again', async (t) => {
+  const { r, io, officeDir } = flakyRig(t);
+  on(r);
+  assert.equal(r.merge.stop('Ada', 'check it').ok, true);
+  io.fail.write = isMain;
+  const resume = r.merge.resume('Admin');
+  assert.equal(resume.ok, false);
+  assert.match(resume.message, /stays stopped/);
+  assert.ok(r.merge.state().stopped);
+  assert.equal(new MergePolicyStore(officeDir).stopped?.reason, 'check it', 'the stop on disk is still there');
+  // A marker beside an enabled file: the enabled file is ignored.
+  const dir = tmp('office-marker');
+  const first = new MergePolicyStore(dir);
+  first.set('o/r', { mode: 'auto', method: 'squash', bases: ['main'], maxChangedLines: 300, maxFiles: 20, extraLowRisk: [], authorization: 'HQ governance PR #123', authorizedBy: 'Owner', authorizedAt: 1 });
+  writeFileSync(path.join(dir, 'automerge.json.failed'), 'a write failed');
+  const again = new MergePolicyStore(dir);
+  assert.deepEqual([again.repos.size, !!again.stopped], [0, true]);
+  const via = rig(t, { officeDir: dir, policy: again });
+  assert.equal(via.merge.resume('Admin').ok, true);
+  assert.ok(!existsSync(path.join(dir, 'automerge.json.failed')), 'a successful save clears the marker');
+  assert.equal(new MergePolicyStore(dir).repos.size, 0, 'and the old policy does not return');
+});
+
+test('the stop still stands when its record cannot be written, and the browser is told when it could not be saved', async (t) => {
+  const broken = tmp('broken-audit');
+  mkdirSync(path.join(broken, 'merge-audit.jsonl'));
+  const r = rig(t, { dir: broken });
+  const stop = r.merge.stop('Ada');
+  assert.equal(stop.ok, true, 'the policy file was saved; only the record could not be written');
+  assert.ok(r.merge.state().stopped);
+  // Through the browser's message: a failed save is a failed result, not a success.
+  const { r: f, io } = flakyRig(t);
+  io.fail.write = isMain;
+  const member = fakeCtx(f, 'member');
+  await h['merge.stop'](member.ctx, member.client, { t: 'merge.stop' });
+  assert.equal(member.sent[0].ok, false);
+  assert.match(member.sent[0].message!, /could not be saved to disk/);
+  assert.ok(f.merge.state().stopped);
 });

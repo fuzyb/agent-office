@@ -51,6 +51,20 @@ commit. Never `--admin`, `--auto`, `--delete-branch` or a force-push, and no rep
 per commit at a time, never again once merged (also after a restart), and a commit GitHub keeps refusing is left to a person after three
 attempts.
 
+## Changes while it verifies, and failed saves
+
+- **A change during verification voids the attempt.** The policy and the emergency stop carry a revision that moves on every change (even one that
+  could not be saved). An attempt notes it when it begins and looks again after every question it asks GitHub and just before the merge call: if it
+  moved, the attempt is void and nothing is merged, **even if the state is back to what it was** (a stop followed by a resume). It is not resumed:
+  a new attempt starts over and asks everything again. Just before the call the office also reads again the current policy (allowlist, branches, method)
+  and, in approve mode, that the approval standing is the one it started with.
+- **A save that fails fails closed.** Switching a repository on, changing its policy, and resuming after a stop take effect only once they are saved: if
+  the write fails, nothing changed and it says so. Switching off and stopping take effect at once, saved or not; if they cannot be saved the office stays
+  stopped, says it could not be saved (never reports a success), removes the older file if it can and writes a marker if it can, so a restart does not bring
+  back the policy that was just taken away. A marker found at startup means nothing is on and it is stopped until an admin resumes it and switches each
+  repository on again. Files are written whole (a temporary file, then a rename). If the disk refuses every write and every removal, nothing more can be
+  promised after a restart: the failure is reported, and the running office stays stopped.
+
 ## The record
 
 Every decision, approval, attempt, call to GitHub, merge, refusal, policy change, stop and resume is one line in the floor's
