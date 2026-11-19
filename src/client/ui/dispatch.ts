@@ -126,6 +126,7 @@ export function openDispatch(net: Net) {
       h('h4', {}, '👥 Workforce on this floor', h('span.count', {}, String(mine.length))),
       mine.length ? table(mine) : h('p.note', {}, inv ? 'Nobody is at a desk on this floor. Dispatch never hires: hire a worker yourself.' : 'Looking…'),
       others.length ? h('details', {}, h('summary', {}, `Other floors (${others.length}): never given this floor's tasks`), table(others)) : null,
+      inv && inv.scope === 'this-floor' ? h('p.note', {}, 'Workers of other floors are shown to admins only.') : null,
       inv?.subagents.length ? h('details', {}, h('summary', {}, `Project subagents (${inv.subagents.length}): definitions, not workers`), h('ul.dispatch-blocked', {}, ...inv.subagents.map((s) => h('li', {}, h('b', {}, s.name), s.description ? ` — ${s.description}` : '')))) : null,
     ];
     body.replaceChildren(...kids.filter((n): n is Node => n !== null));

@@ -5,7 +5,7 @@ import type http from 'node:http';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { Readable } from 'node:stream';
-import { confirm, inventory, preview, POLICY, type DispatchFloor, type DispatchOffice } from '../src/server/dispatch/dispatcher.js';
+import { AGENT, confirm, inventory, preview, POLICY, type DispatchFloor, type DispatchOffice, type Viewer } from '../src/server/dispatch/dispatcher.js';
 import { conservative, manual } from '../src/server/dispatch/extension.js';
 import { subagentsOf } from '../src/server/dispatch/subagents.js';
 import { officeWorkers } from '../src/server/hooks/office-workers.js';
@@ -97,8 +97,9 @@ const held = (f: Fake, title = 'Fix the login redirect', provider: AgentProvider
   assert.equal(f.queue.add(`${title}: details`, 'Ada', title, undefined, provider, undefined, undefined, opts.owner, { hold: true, needs: opts.needs as never }), undefined);
   return f.queue.state().tasks.at(-1)!;
 };
-const previewOf = (o: DispatchOffice, f: Fake, taskId: string, needs?: object) => {
-  const p = preview(o, f.floor, taskId, needs as never);
+const ADMIN: Viewer = { admin: true };
+const previewOf = (o: DispatchOffice, f: Fake, taskId: string, needs?: object, viewer: Viewer = ADMIN) => {
+  const p = preview(o, f.floor, taskId, viewer, needs as never);
   assert.ok(typeof p !== 'string', String(p));
   return p;
 };
@@ -140,7 +141,7 @@ test('workers saved by an older office, with missing or unknown roles, all appea
   const second = realManager(dir, data);
   t.after(() => second.shutdown());
   const f: DispatchFloor = { id: 'f1', dir, def: { name: 'Floor' }, workers: second, queue: { state: () => ({ tasks: [], maxWorkers: 3 }), running: 0, limit: 3, assign: () => 'no' }, github: { pulls: { items: [] } } };
-  const inv = inventory({ floors: () => [f], planLimits: () => ({ windows: [], at: 0 }) }, f);
+  const inv = inventory({ floors: () => [f], planLimits: () => ({ windows: [], at: 0 }) }, f, ADMIN);
   assert.deepEqual(inv.rows.map((r) => r.id).sort(), [a.id, b.id, c.id].sort(), 'every saved worker is listed');
   for (const r of inv.rows) assert.deepEqual({ name: r.name, desk: r.desk.replace('Desk ', 'desk-'), createdAt: second.get(r.id)!.createdAt }, { name: before[r.id].name, desk: before[r.id].desk, createdAt: before[r.id].createdAt }, 'identity unchanged');
   const row = (id: string) => inv.rows.find((r) => r.id === id)!;
@@ -162,7 +163,7 @@ test('a worker of every supported agent is listed with its own, and a task for t
   // A floor started with a custom agent can queue for every agent; a plain one cannot queue for 'custom'.
   const f = fakeFloor(t, 'f1', 'Floor', workers, { defaultProvider: 'custom' });
   const o = office([f]);
-  const inv = inventory(o, f.floor);
+  const inv = inventory(o, f.floor, ADMIN);
   assert.deepEqual(inv.rows.map((r) => r.provider), [...AGENT_PROVIDERS]);
   assert.ok(inv.rows.every((r) => r.seat === 'worker' && r.assignable));
   for (const p of AGENT_PROVIDERS) {
@@ -247,7 +248,7 @@ test("another floor's worker is excluded from the preview and out of reach of a 
   assert.deepEqual(b.prompts, []);
   assert.deepEqual(a.prompts, []);
   // The inventory lists both floors, each worker with its own floor.
-  assert.deepEqual(inventory(o, a.floor).rows.map((r) => [r.name, r.floorName]), [['Mine', 'Alpha'], ['Theirs', 'Beta']]);
+  assert.deepEqual(inventory(o, a.floor, ADMIN).rows.map((r) => [r.name, r.floorName]), [['Mine', 'Alpha'], ['Theirs', 'Beta']]);
 });
 
 // --- 7: legacy and unknown roles ------------------------------------------------------------------------------------------------
@@ -267,7 +268,7 @@ test('a missing or unknown role does not break dispatch: such a worker is a gene
   assert.match(pv.blocked.find((b) => b.name === 'Legacy')!.reasons.join(' '), /needs a QA Engineer and it is General Worker/);
   const skilled = held(f, 'Needs tests', 'claude', { needs: { skills: ['test'] } });
   assert.deepEqual(previewOf(o, f, skilled.id).candidates, []);
-  const row = inventory(o, f.floor).rows.find((r) => r.name === 'Future')!;
+  const row = inventory(o, f.floor, ADMIN).rows.find((r) => r.name === 'Future')!;
   assert.deepEqual([row.roleKnown, row.roleLabel, row.assignable], [false, 'time-traveller', true]);
 });
 
@@ -280,7 +281,7 @@ test('board agents, shells and meeting seats are listed apart and are never give
   const ordinary = worker({ name: 'Ordinary' });
   const f = fakeFloor(t, 'f1', 'Floor', [...board, shell, seated, ordinary]);
   const o = office([f]);
-  const inv = inventory(o, f.floor);
+  const inv = inventory(o, f.floor, ADMIN);
   assert.deepEqual(inv.rows.filter((r) => r.seat !== 'worker').map((r) => r.seat), ['board-agent', 'board-agent', 'board-agent', 'shell', 'meeting-seat']);
   assert.ok(inv.rows.filter((r) => r.seat !== 'worker').every((r) => !r.assignable && r.availability === 'unavailable'));
   assert.deepEqual(inv.rows.filter((r) => r.assignable).map((r) => r.name), ['Ordinary']);
@@ -296,7 +297,7 @@ test("a project's Claude subagents are listed as definitions, never as workers",
   mkdirSync(path.join(f.floor.dir, '.claude', 'agents'), { recursive: true });
   writeFileSync(path.join(f.floor.dir, '.claude', 'agents', 'code-reviewer.md'), '---\nname: code-reviewer\ndescription: "Reviews diffs"\ntools: Read\n---\nbody that is not read');
   writeFileSync(path.join(f.floor.dir, '.claude', 'agents', 'plain.md'), 'no front matter');
-  const inv = inventory(office([f]), f.floor);
+  const inv = inventory(office([f]), f.floor, ADMIN);
   assert.deepEqual(inv.subagents.map((s) => [s.name, s.description, s.file]), [['code-reviewer', 'Reviews diffs', '.claude/agents/code-reviewer.md'], ['plain', undefined, '.claude/agents/plain.md']]);
   assert.deepEqual(inv.rows.map((r) => r.name), ['Real']);
   assert.deepEqual(subagentsOf('x', path.join(root, 'no-such-folder')), []);
@@ -330,7 +331,7 @@ test('changing a worker\'s role never makes it eligible for what it was not, and
     const pv = previewOf(o, f, task.id);
     outcomes.set(role ?? '(none)', JSON.stringify({ ok: pv.candidates.map((c) => c.name), blocked: pv.blocked.map((b) => b.name).sort() }));
     // The task-independent look is identical for every role value.
-    const inv = inventory(o, f.floor);
+    const inv = inventory(o, f.floor, ADMIN);
     outcomes.set(`${role ?? '(none)'}/inventory`, JSON.stringify(inv.rows.map((r) => [r.name, r.availability, r.assignable])));
   }
   const inventories = [...outcomes].filter(([k]) => k.endsWith('/inventory')).map(([, v]) => v);
@@ -385,8 +386,8 @@ test('an open pull request or a queue task keeps a worker reserved: its branch i
   const task = held(f);
   assert.deepEqual(previewOf(o, f, task.id).candidates, []);
   assert.match(previewOf(o, f, task.id).blocked[0].reasons.join(' '), /its pull request #7 is still open/);
-  assert.equal(inventory(o, f.floor).rows[0].availability, 'reserved');
-  assert.equal(inventory(o, f.floor).rows[0].openPr, 7);
+  assert.equal(inventory(o, f.floor, ADMIN).rows[0].availability, 'reserved');
+  assert.equal(inventory(o, f.floor, ADMIN).rows[0].openPr, 7);
 });
 
 // --- ranking and the reasons ---------------------------------------------------------------------------------------------------
@@ -524,12 +525,12 @@ test('dispatch can only type one prompt and start one task: it has no way to hir
 
 // --- the browser's messages and the agents' read-only route ---------------------------------------------------------------------
 
-function fakeCtx(floors: Fake[], current: string) {
+function fakeCtx(floors: Fake[], current: string, accountId?: string) {
   const sent: unknown[] = [];
   const warned: string[] = [];
   const map = new Map(floors.map((f) => [f.floor.id, f.floor]));
-  const ctx = { floors: map, limits: { state: { windows: [], at: 0 } }, floorOf: (c: { peer: { floor: string } }) => map.get(c.peer.floor), sendTo: (_c: unknown, m: unknown) => void sent.push(m), warn: (_c: unknown, text?: string) => void (text && warned.push(text)) };
-  return { ctx, sent, warned, client: { peer: { name: 'Ada', floor: current } } };
+  const ctx = { floors: map, limits: { state: { windows: [], at: 0 } }, meOf: (accountId?: string) => ({ admin: accountId === 'admin' }), floorOf: (c: { peer: { floor: string } }) => map.get(c.peer.floor), sendTo: (_c: unknown, m: unknown) => void sent.push(m), warn: (_c: unknown, text?: string) => void (text && warned.push(text)) };
+  return { ctx, sent, warned, client: { accountId, peer: { name: 'Ada', floor: current } } };
 }
 
 test("the browser's messages work on the floor the person is on: a task or worker of another floor is out of reach", (t) => {
@@ -537,7 +538,7 @@ test("the browser's messages work on the floor the person is on: a task or worke
   const b = fakeFloor(t, 'b', 'Beta', [worker({ name: 'Theirs' })]);
   const taskA = held(a, 'On alpha');
   const taskB = held(b, 'On beta');
-  const { ctx, sent, warned, client } = fakeCtx([a, b], 'a');
+  const { ctx, sent, warned, client } = fakeCtx([a, b], 'a', 'admin');
   const h = dispatchHandlers as unknown as Record<string, (c: unknown, cl: unknown, m: unknown) => void>;
   h['dispatch.inventory'](ctx, client, { t: 'dispatch.inventory' });
   assert.equal((sent[0] as { inventory: { rows: unknown[] } }).inventory.rows.length, 2);
@@ -585,7 +586,8 @@ test('an agent can look at the inventory and a preview through its own token, an
   const taskId = task.state().tasks[0].id;
   const inv = await call(ctx, { id: me.id, token }, 'GET', '/inventory');
   assert.equal(inv.status, 200);
-  assert.deepEqual(inv.json.rows.map((r: { name: string; floorName: string }) => r.floorName).sort(), ['Floor', 'Other']);
+  assert.deepEqual(inv.json.rows.map((r: { floorName: string }) => r.floorName), ['Floor'], 'a worker is not an admin: its own floor only');
+  assert.equal(inv.json.scope, 'this-floor');
   assert.equal(inv.json.policy.auto, false);
   const pv = await call(ctx, { id: me.id, token }, 'GET', `/preview?task=${taskId}`);
   assert.equal(pv.status, 200);
@@ -596,6 +598,71 @@ test('an agent can look at the inventory and a preview through its own token, an
   // There is no route that dispatches: a POST to one is refused as unknown.
   for (const route of ['/dispatch', '/confirm', '/inventory', '/preview']) assert.equal((await call(ctx, { id: me.id, token }, 'POST', route)).status, 405, route);
   assert.equal(task.state().tasks[0].status, 'queued');
+});
+
+// --- who may see another floor ----------------------------------------------------------------------------------------------------
+
+test("another floor's workers, tasks and subagents are shown to admins only; anyone else sees what their own floor already shows", (t) => {
+  const mine = worker({ name: 'Mine' });
+  const secret = worker({ name: 'Secret Worker', task: { name: 'Hidden Project Plan', summary: 'Hidden summary' }, role: 'security-engineer' });
+  const a = fakeFloor(t, 'a', 'Alpha', [mine]);
+  const b = fakeFloor(t, 'b', 'Beta Confidential', [secret]);
+  held(b, 'Beta private task');
+  mkdirSync(path.join(b.floor.dir, '.claude', 'agents'), { recursive: true });
+  writeFileSync(path.join(b.floor.dir, '.claude', 'agents', 'beta-agent.md'), '---\nname: beta-agent\n---\n');
+  const taskA = held(a, 'Alpha task');
+  const o = office([a, b]);
+  const h = dispatchHandlers as unknown as Record<string, (c: unknown, cl: unknown, m: unknown) => void>;
+  const leaks = (value: unknown) => JSON.stringify(value).match(/Secret Worker|Hidden Project Plan|Hidden summary|Beta Confidential|Beta private task|beta-agent|security-engineer|Security Engineer/g) ?? [];
+
+  // A member (an account that is not an admin) over the browser's messages: nothing of floor b anywhere in what comes back.
+  const member = fakeCtx([a, b], 'a', 'member');
+  h['dispatch.inventory'](member.ctx, member.client, { t: 'dispatch.inventory' });
+  h['dispatch.preview'](member.ctx, member.client, { t: 'dispatch.preview', taskId: taskA.id, needs: { providers: [...AGENT_PROVIDERS] } });
+  const inv = (member.sent[0] as { inventory: { rows: { name: string }[]; subagents: unknown[]; scope: string } }).inventory;
+  assert.deepEqual(inv.rows.map((r) => r.name), ['Mine']);
+  assert.deepEqual(inv.subagents, []);
+  assert.equal(inv.scope, 'this-floor');
+  const pv = (member.sent[1] as { preview: { candidates: unknown[]; blocked: unknown[] } }).preview;
+  assert.deepEqual((pv.candidates as { name: string }[]).map((c) => c.name), ['Mine']);
+  assert.deepEqual(pv.blocked, [], "another floor's worker is not even named among those that cannot take it");
+  assert.deepEqual(leaks(member.sent), []);
+  // Nor can a member reach it with a confirm, or learn anything from the refusal.
+  h['dispatch.confirm'](member.ctx, member.client, { t: 'dispatch.confirm', taskId: taskA.id, workerId: secret.id });
+  const refusal = member.sent[2] as { ok: boolean; message: string };
+  assert.deepEqual([refusal.ok, refusal.message], [false, 'No such worker on this floor']);
+  assert.deepEqual(b.prompts, []);
+  assert.deepEqual(member.warned, ['No such worker on this floor']);
+
+  // A guest with no account behind the connection is not an admin either.
+  const guest = fakeCtx([a, b], 'a', undefined);
+  h['dispatch.inventory'](guest.ctx, guest.client, { t: 'dispatch.inventory' });
+  assert.deepEqual(leaks(guest.sent), []);
+
+  // An admin sees the whole building; the preview still never offers another floor's worker, and says why not.
+  const admin = fakeCtx([a, b], 'a', 'admin');
+  h['dispatch.inventory'](admin.ctx, admin.client, { t: 'dispatch.inventory' });
+  const all = (admin.sent[0] as { inventory: { rows: { name: string; floorName: string }[]; subagents: { name: string }[]; scope: string } }).inventory;
+  assert.deepEqual(all.rows.map((r) => [r.name, r.floorName]), [['Mine', 'Alpha'], ['Secret Worker', 'Beta Confidential']]);
+  assert.deepEqual(all.subagents.map((s) => s.name), ['beta-agent']);
+  assert.equal(all.scope, 'all-floors');
+  h['dispatch.preview'](admin.ctx, admin.client, { t: 'dispatch.preview', taskId: taskA.id, needs: { providers: [...AGENT_PROVIDERS] } });
+  const apv = (admin.sent[1] as { preview: { candidates: { name: string }[]; blocked: { name: string; reasons: string[] }[] } }).preview;
+  assert.deepEqual(apv.candidates.map((c) => c.name), ['Mine']);
+  assert.match(apv.blocked.find((x) => x.name === 'Secret Worker')!.reasons[0], /another floor/);
+
+  // Admin status is asked of the office at the moment of the request, not remembered from when the page connected.
+  let admin_now = true;
+  const demoted = { ...member.ctx, meOf: () => ({ admin: admin_now }) };
+  h['dispatch.inventory'](demoted, member.client, { t: 'dispatch.inventory' });
+  admin_now = false;
+  h['dispatch.inventory'](demoted, member.client, { t: 'dispatch.inventory' });
+  const rowsNow = (member.sent.slice(-2) as { inventory: { rows: unknown[] } }[]).map((m) => m.inventory.rows.length);
+  assert.deepEqual(rowsNow, [2, 1]);
+
+  // An agent's own token never opens another floor either: the inventory it fetches is its floor's.
+  assert.deepEqual(inventory(o, a.floor, AGENT).rows.map((r) => r.name), ['Mine']);
+  assert.deepEqual(leaks(preview(o, a.floor, taskA.id, AGENT)), []);
 });
 
 test('no source under src/server (other than the pinned ones) changed what it does with a role: dispatch reads it only to rank and to match a task', () => {

@@ -7,7 +7,7 @@ there, instead of hiring another. Looking is free; giving a task is one click, a
 
 ## What it is, and is not
 
-- **Is:** a read-only **inventory** of every worker on every floor (what it runs, its role, status,
+- **Is:** a read-only **inventory** of every worker on every floor (admins; everyone else sees their own floor) (what it runs, its role, status,
   task, branch, pull request, and whether it could take a task now), a **preview** of who could take
   a waiting queue task (best first, with the reasons), and a **confirm** that types the task into the
   chosen worker's terminal and starts the queue task.
@@ -18,6 +18,13 @@ there, instead of hiring another. Looking is free; giving a task is one click, a
   request; deploys. It cannot reach those (`tests/workforce-dispatch.test.ts` checks what the code
   imports and calls).
 
+## Who sees what
+
+An **admin** sees the whole building: every floor's workers, their tasks and the projects' subagents. Anyone else (a member, or a guest with
+no account) sees **their own floor only**, which is what the office already shows them, and another floor's workers are not even named in a
+preview. Whether someone is an admin is asked of the office at each request. A worker's own token (`office-workers inventory`, the MCP
+tools) is never an admin: it sees its own floor. Giving a task is always limited to the floor the person is on.
+
 ## Using it
 
 - **Browser (3D and 2D):** the task queue's **🧭 Dispatch** button. *Pending tasks* → **Who could take
@@ -25,7 +32,7 @@ there, instead of hiring another. Looking is free; giving a task is one click, a
   …** asks you to confirm. *Assigned or running* and *Workforce* show the rest. **✋ Hold for dispatch** on a
   task keeps the queue from hiring a worker for it (the queue otherwise still does, as it always has);
   **Release** gives it back to the queue, which is the one way a task gets a new hire.
-- **Workers (read-only):** `office-workers inventory` and `office-workers preview <task id>`, and the MCP
+- **Workers (read-only, their own floor):** `office-workers inventory` and `office-workers preview <task id>`, and the MCP
   tools `workforce_inventory` and `dispatch_preview`. An agent can look; it cannot dispatch. Giving a
   task is a person's confirmation in the browser, so a worker cannot hand work around on its own.
 

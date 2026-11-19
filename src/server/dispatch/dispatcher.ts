@@ -34,6 +34,14 @@ export interface DispatchFloor {
   readonly github: { readonly pulls: { readonly items: GhPull[] } };
 }
 
+/** Who is looking. Another floor's workers, their tasks and its subagents are for admins only: anyone else sees what they can already see on their own floor. */
+export interface Viewer {
+  readonly admin: boolean;
+}
+
+/** The agents' route has no account behind it: a worker looks at its own floor only. */
+export const AGENT: Viewer = { admin: false };
+
 export interface DispatchOffice {
   floors(): Iterable<DispatchFloor>;
   planLimits(): PlanLimits;
@@ -84,17 +92,22 @@ export function usageNote(office: DispatchOffice): string | undefined {
   return usageBlock(office.planLimits()).claude;
 }
 
-/** Every worker of every floor, whether it could take a task, and the projects' own Claude subagents. Read-only. */
-export function inventory(office: DispatchOffice, floor: DispatchFloor): Inventory {
+/** The floors `viewer` may look into: all of them for an admin, otherwise the one they are on. */
+function visible(office: DispatchOffice, floor: DispatchFloor, viewer: Viewer): DispatchFloor[] {
+  return [...office.floors()].filter((f) => viewer.admin || f.id === floor.id);
+}
+
+/** Every worker they may see, whether it could take a task, and those floors' own Claude subagents. Read-only. */
+export function inventory(office: DispatchOffice, floor: DispatchFloor, viewer: Viewer): Inventory {
   const rows = [];
   const subagents = [];
-  for (const f of office.floors()) {
+  for (const f of visible(office, floor, viewer)) {
     const tasks = f.queue.state().tasks;
     for (const w of f.workers.list()) rows.push(inventoryRow(factsOf(f, w, tasks)));
     subagents.push(...subagentsOf(f.id, f.dir));
   }
   const note = usageNote(office);
-  return { floorId: floor.id, rows, subagents, ...(note ? { usageNote: note } : {}), policy: POLICY, at: Date.now() };
+  return { floorId: floor.id, scope: viewer.admin ? 'all-floors' : 'this-floor', rows, subagents, ...(note ? { usageNote: note } : {}), policy: POLICY, at: Date.now() };
 }
 
 /** What a task may ask: a person's `needs` for this look, else the ones saved on the task. */
@@ -118,11 +131,12 @@ const waiting = (floor: DispatchFloor, taskId: string): QueueTask | string => {
 };
 
 /** Who could take a waiting task of `floor`, best first, and why not the others. Changes nothing, hires nobody. */
-export function preview(office: DispatchOffice, floor: DispatchFloor, taskId: string, needs?: TaskNeeds): DispatchPreview | string {
+export function preview(office: DispatchOffice, floor: DispatchFloor, taskId: string, viewer: Viewer, needs?: TaskNeeds): DispatchPreview | string {
   const task = waiting(floor, taskId);
   if (typeof task === 'string') return task;
   const workers: WorkerFacts[] = [];
-  for (const f of office.floors()) {
+  // Another floor's workers are never candidates; whether they are even named among those that cannot is up to who is looking.
+  for (const f of visible(office, floor, viewer)) {
     const tasks = f.queue.state().tasks;
     for (const w of f.workers.list()) workers.push(factsOf(f, w, tasks));
   }

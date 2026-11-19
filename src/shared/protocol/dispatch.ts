@@ -71,6 +71,8 @@ export interface DispatchPolicy {
 export interface Inventory {
   /** The floor the person is on: the one whose tasks they can dispatch. */
   floorId: string;
+  /** What the person may see: every floor's workers (an admin), or only this floor's, which is all a person sees anywhere else in the office. */
+  scope: 'all-floors' | 'this-floor';
   rows: InventoryRow[];
   subagents: Subagent[];
   /** Claude plan windows near their limit, in words, when there are any. */

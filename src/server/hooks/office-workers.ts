@@ -1,6 +1,6 @@
 import type http from 'node:http';
 import { notLeaving } from '../leave-on-merge.js';
-import { inventory, preview } from '../dispatch/dispatcher.js';
+import { AGENT, inventory, preview } from '../dispatch/dispatcher.js';
 import { officeOf } from '../dispatch/office.js';
 import { findWorker, readHireRequest, readHomeRequest, readPrRequest, workerRow, type PullsView } from '../office-workers.js';
 import { gh } from '../github.js';
@@ -54,9 +54,9 @@ export async function officeWorkers(ctx: Ctx, req: http.IncomingMessage, res: ht
   };
   const action = url.pathname.slice('/office/workers'.length);
   // Looking only: who could take a task, never giving one. Giving one is a person's confirmation in the browser.
-  if (req.method === 'GET' && action === '/inventory') return send(res, 200, inventory(officeOf(ctx), floor));
+  if (req.method === 'GET' && action === '/inventory') return send(res, 200, inventory(officeOf(ctx), floor, AGENT));
   if (req.method === 'GET' && action === '/preview') {
-    const p = preview(officeOf(ctx), floor, str(url.searchParams.get('task'), 32));
+    const p = preview(officeOf(ctx), floor, str(url.searchParams.get('task'), 32), AGENT);
     return typeof p === 'string' ? send(res, 404, { error: p }) : send(res, 200, p);
   }
   if (req.method === 'GET' && !action) {
