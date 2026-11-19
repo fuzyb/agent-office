@@ -6,12 +6,14 @@ import type { PrAssessment, QaState, QaViewState, ReviewerOffer, ServerMsg } fro
 import type { Net } from '../net';
 import { store } from '../state';
 import { h, openModal, toast } from './dom';
+import { mergeView, type MergeView } from './merge';
 
 interface Open {
   state?: QaViewState;
   offers: Map<number, ReviewerOffer>;
   /** The pull request whose "record a review" form is open. */
   recording?: number;
+  merge?: MergeView;
   draw(): void;
 }
 let open: Open | null = null;
@@ -19,6 +21,7 @@ let open: Open | null = null;
 /** The office's answers to this window; ignored when it isn't open. */
 export function routeQaMessage(msg: ServerMsg) {
   if (!open) return;
+  if (open.merge?.route(msg)) return;
   if (msg.t === 'qa.state') open.state = msg.state;
   else if (msg.t === 'qa.reviewers') open.offers.set(msg.offer.pr, msg.offer);
   else if (msg.t === 'qa.result') {
@@ -46,7 +49,11 @@ export function openQa(net: Net) {
   const el = h('div.modal', { role: 'dialog', 'aria-label': 'QA', style: 'width:min(920px,100%)' }, h('header', {}, h('h2', {}, '🧪 QA'), refresh, close), body, h('footer', {}, h('span.grow', {}, 'It updates when GitHub is read, never on a timer of its own, and costs no model usage. A review counts only for the commit it was about. Humans merge.')));
   const state: Open = { offers: new Map(), draw: () => render() };
   open = state;
-  const ask = () => net.send({ t: 'qa.state' });
+  state.merge = mergeView(net, () => render());
+  const ask = () => {
+    net.send({ t: 'qa.state' });
+    state.merge?.ask();
+  };
   const admin = () => store.me.admin;
 
   const chip = (text: string, cls = '') => h('span.qa-chip', { class: cls }, text);
@@ -91,6 +98,7 @@ export function openQa(net: Net) {
       h('div.reason', {}, p.authorsKnown ? `Did the work (by the office's records): ${p.authors.join(', ')}` : "Who did the work is not known to the office, so a worker's review cannot be shown independent."),
       ...p.evidence.map((e) => h('div.qa-evidence', { class: e.status }, `${e.kind === 'human' ? `🧑 ${e.by ?? 'a person'}` : `🤖 ${e.reviewerName ?? 'a worker'}${e.reviewerProvider ? ` (${e.reviewerProvider})` : ''}`}: ${e.verdict} for ${e.sha.slice(0, 7)}`, chip(e.status === 'counts' ? 'counts' : e.status, e.status === 'counts' ? 'good' : 'warn'), e.crossProvider === true ? chip('cross-provider') : null, e.why ? h('span.reason', {}, ` ${e.why}`) : null, e.reference ? h('span.reason', {}, ` ref: ${e.reference}`) : null)),
       p.assigned ? h('div.reason', {}, `🤖 ${p.assigned.workerName} has the review and has not answered.`) : null,
+      state.merge?.badge(p.number) ?? null,
       p.state === 'needs-review' || p.state === 'blocked' || p.state === 'awaiting'
         ? h('div.qa-actions', {}, p.state === 'needs-review' && !p.assigned ? h('button.btn', { type: 'button', onclick: () => net.send({ t: 'qa.reviewers', pr: p.number }) }, '🔍 Find a reviewer') : null, admin() ? h('button.btn', { type: 'button', onclick: () => ((state.recording = state.recording === p.number ? undefined : p.number), render()) }, '🧑 Record a review') : null)
         : null,
@@ -101,7 +109,7 @@ export function openQa(net: Net) {
 
   const render = () => {
     const s = state.state;
-    const kids: (Node | null)[] = [];
+    const kids: (Node | null)[] = [state.merge?.panel() ?? null];
     if (!s) kids.push(h('p.note', {}, 'Looking…'));
     else if (!s.prs.length) kids.push(h('p.note', {}, 'No open pull requests on this floor (or GitHub has not been read yet).'));
     else {

@@ -156,6 +156,8 @@ export function installWorkerActions(ctx: Ctx, core: CoreState, parts: WorkerAct
   ctx.messages.on('qa.state', routeQaMessage);
   ctx.messages.on('qa.reviewers', routeQaMessage);
   ctx.messages.on('qa.result', routeQaMessage);
+  ctx.messages.on('merge.state', routeQaMessage);
+  ctx.messages.on('merge.result', routeQaMessage);
   function killWorker(id: string) {
     const w = store.workers.get(id);
     if (!w) return;

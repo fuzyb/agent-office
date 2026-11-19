@@ -3,7 +3,7 @@
 Back to the [features](features.md). Builds on [dispatch](dispatch.md).
 
 Where each open pull request of a floor stands, with the evidence behind it, and giving a review to an
-existing worker. **Ready** means *ready for a person to merge*. Nothing here merges, pushes, comments, reruns a
+existing worker. **Ready** means *ready for a person to merge*, unless the owner has switched on [automatic merging](auto-merge.md) for the repository (off by default, behind a gate): then QA also gives the reviews to idle QA workers, a sensitive change needs two independent reviewers, and the merge is a separate step with its own checks. Nothing in this view merges, pushes, comments, reruns a
 check, hires anyone or calls a model.
 
 ## Where a pull request stands

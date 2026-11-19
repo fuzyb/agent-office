@@ -10,6 +10,7 @@ import type { DispatchClientMsg, DispatchServerMsg } from './protocol/dispatch.j
 import type { FloorClientMsg, FloorServerMsg, PlanClientMsg } from './protocol/floors.js';
 import type { GitHubClientMsg, GitHubServerMsg } from './protocol/github.js';
 import type { MeetingClientMsg, MeetingServerMsg } from './protocol/meetings.js';
+import type { MergeClientMsg, MergeServerMsg } from './protocol/merge.js';
 import type { PresenceClientMsg, PresenceServerMsg } from './protocol/presence.js';
 import type { QaClientMsg, QaServerMsg } from './protocol/qa.js';
 import type { QueueClientMsg, QueueServerMsg } from './protocol/queue.js';
@@ -26,6 +27,7 @@ export * from './protocol/dispatch.js';
 export * from './protocol/floors.js';
 export * from './protocol/github.js';
 export * from './protocol/meetings.js';
+export * from './protocol/merge.js';
 export * from './protocol/presence.js';
 export * from './protocol/qa.js';
 export * from './protocol/queue.js';
@@ -43,6 +45,7 @@ export type ClientMsg =
   | QueueClientMsg
   | DispatchClientMsg
   | QaClientMsg
+  | MergeClientMsg
   | MeetingClientMsg
   | FloorClientMsg
   | PlanClientMsg
@@ -74,4 +77,5 @@ export type ServerMsg =
   | UsageServerMsg
   | ToysServerMsg
   | DispatchServerMsg
-  | QaServerMsg;
+  | QaServerMsg
+  | MergeServerMsg;

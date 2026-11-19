@@ -30,7 +30,10 @@ const RULES: [RiskCategory, RegExp][] = [
   ['source', /^(src|lib|app|server|client)\//i],
 ];
 
-/** Categories that need a person's own review before a pull request can be ready. */
+/** Independent reviews of the exact commit, by different reviewers, that a sensitive technical change needs while automatic merging is on, instead of a person's review. */
+export const STRICT_REVIEWS = 2;
+
+/** Categories that need a person's own review before a pull request can be ready (or, while automatic merging is on, the strict tier: see STRICT_REVIEWS). 'unknown' always needs a person. */
 export const NEEDS_HUMAN: ReadonlySet<RiskCategory> = new Set(['ci-workflow', 'install', 'dependencies', 'security', 'unknown']);
 
 const WHY_HUMAN: Record<string, string> = {
@@ -40,6 +43,23 @@ const WHY_HUMAN: Record<string, string> = {
   security: 'it touches authentication, accounts, secrets or permissions',
   unknown: 'its file list is incomplete or unknown',
 };
+
+/** Technical areas that are verified harder (the strict tier): CI, installs, infrastructure, dependencies, configuration, keys and secrets. */
+const SENSITIVE: RegExp[] = [
+  /^\.github\//i,
+  /^(install\.(sh|ps1)|Dockerfile[^/]*|docker-compose[^/]*)$/i,
+  /^(bin|deploy|infra|infrastructure|terraform|k8s|helm|scripts)\//i,
+  /(^|\/)(package(-lock)?\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|\.npmrc|\.yarnrc[^/]*)$/i,
+  /(^|\/)(tsconfig[^/]*\.json|vite\.config\.[a-z]+|eslint[^/]*|\.eslintrc[^/]*|\.prettierrc[^/]*|\.gitignore|\.gitattributes|\.editorconfig)$/i,
+  /(^|\/)\.env/i,
+  /(^|\/)[^/]*\.(pem|key|crt|p12|pfx)$/i,
+  /(^|\/)(secrets?|credentials?)[^/]*$/i,
+  /^[^/]+\.(ya?ml|toml|ini|cfg)$/i, // configuration files at the root
+];
+
+
+/** Whether `path` is a sensitive technical area (CI, installs, infrastructure, dependencies, security, configuration, keys): verified harder, never just waved through. */
+export const isSensitive = (path: string): boolean => SENSITIVE.some((re) => re.test(path)) || riskOf([path]).some((r) => NEEDS_HUMAN.has(r) && r !== 'unknown');
 
 /** The categories of the files a pull request changes: every one that applies. Unknown when the list is missing or cut off. */
 export function riskOf(files: readonly string[] | undefined): RiskCategory[] {
@@ -121,6 +141,8 @@ export interface Inputs {
   authors: Authors;
   /** A review given to a worker for this commit, still unanswered. */
   assigned?: { workerName: string; at: number };
+  /** Automatic merging is on for this repository: a sensitive technical change then needs STRICT_REVIEWS independent reviews instead of a person's. Billing and spending are decided elsewhere (shared/financial.ts). */
+  autonomy?: boolean;
 }
 
 /**
@@ -138,7 +160,12 @@ export function assess(pr: PrFacts, input: Inputs): PrAssessment {
   const humanCounts = counting.some((e) => e.kind === 'human');
   const conflicts = pr.mergeable === 'CONFLICTING';
   const needsHuman = [...new Set(risk.filter((r) => NEEDS_HUMAN.has(r)))];
-  const mustHuman = needsHuman.length > 0 || pr.fork;
+  // With automatic merging on, a sensitive technical area is verified harder rather than handed to a person; an unknown change, or a fork, still is.
+  const personFor = input.autonomy ? needsHuman.filter((r) => r === 'unknown') : needsHuman;
+  const mustHuman = personFor.length > 0 || pr.fork;
+  const need = input.autonomy && (pr.files ?? []).some(isSensitive) ? STRICT_REVIEWS : 1;
+  const reviewers = new Set(counting.map((e) => (e.kind === 'human' ? `human:${e.by ?? e.id}` : `worker:${e.reviewerId ?? e.id}`)));
+  const enough = humanCounts || reviewers.size >= need;
   const reasons: string[] = [];
   let state: QaState;
 
@@ -148,7 +175,7 @@ export function assess(pr: PrFacts, input: Inputs): PrAssessment {
     if (conflicts) reasons.push('it has merge conflicts: it needs a rebase');
   } else if (mustHuman && !humanCounts) {
     state = 'blocked';
-    for (const r of needsHuman) reasons.push(`${WHY_HUMAN[r]}: a person has to review it`);
+    for (const r of personFor) reasons.push(`${WHY_HUMAN[r]}: a person has to review it`);
     if (pr.fork) reasons.push('it comes from a fork: a person has to review it');
   } else if (evidence.some((e) => e.status === 'not-approval' && e.verdict === 'changes')) {
     state = 'blocked';
@@ -158,9 +185,10 @@ export function assess(pr: PrFacts, input: Inputs): PrAssessment {
     if (pr.draft) reasons.push('it is still a draft');
     if (checks.pending) reasons.push(`${checks.pending} check${checks.pending === 1 ? '' : 's'} still running`);
     if (checks.missing.length) reasons.push(`not reported: ${checks.missing.join(', ')}`);
-  } else if (!counting.length) {
+  } else if (!enough) {
     state = 'needs-review';
-    reasons.push(input.assigned ? `${input.assigned.workerName} has the review and has not answered` : 'checks pass; no independent review of this commit yet');
+    const have = reviewers.size ? ` (${reviewers.size} of ${need} so far)` : '';
+    reasons.push(input.assigned ? `${input.assigned.workerName} has the review and has not answered` : need > 1 ? `checks pass; it changes a sensitive area, so it needs ${need} independent reviewers of this commit${have}` : 'checks pass; no independent review of this commit yet');
     const odd = evidence.find((e) => e.status === 'unverifiable' || e.status === 'not-independent');
     if (odd?.why) reasons.push(`a review exists but does not count: ${odd.why}`);
   } else if (!exact) {
@@ -169,7 +197,7 @@ export function assess(pr: PrFacts, input: Inputs): PrAssessment {
     reasons.push(`confirming the checks of exactly ${pr.sha.slice(0, 7)}`);
   } else {
     state = 'ready';
-    reasons.push(`checks of ${pr.sha.slice(0, 7)} pass and an independent review of it stands: ready for a person to merge`);
+    reasons.push(input.autonomy ? `checks of ${pr.sha.slice(0, 7)} pass and ${reviewers.size} independent review${reviewers.size === 1 ? '' : 's'} of it ${reviewers.size === 1 ? 'stands' : 'stand'}: ready to merge` : `checks of ${pr.sha.slice(0, 7)} pass and an independent review of it stands: ready for a person to merge`);
   }
 
   return {
@@ -191,6 +219,7 @@ export function assess(pr: PrFacts, input: Inputs): PrAssessment {
     evidence,
     ...(input.assigned ? { assigned: input.assigned } : {}),
     needsHuman: mustHuman,
+    reviewsNeeded: need,
     updatedAt: pr.updatedAt,
   };
 }
