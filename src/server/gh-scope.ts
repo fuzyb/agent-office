@@ -17,6 +17,9 @@ const REPO = /^[\w.-]+\/[\w.-]+$/;
 
 export const NO_REPO = 'This floor has no GitHub repository configured, so the office will not guess one from a remote. Push the project to GitHub with an origin remote, then add it again.';
 
+/** GitHub, or gh, answered with rows of another repository. */
+export class ForeignRows extends Error {}
+
 /** Whether two `owner/name`s are the same repository (GitHub ignores case). */
 export const sameRepo = (a: string | undefined, b: string | undefined): boolean => !!a && !!b && a.toLowerCase() === b.toLowerCase();
 

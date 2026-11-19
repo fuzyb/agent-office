@@ -1,6 +1,6 @@
 import { CommitChecks, checkOf, type PullExtra, type ShaChecks } from './gh-checks.js';
 import { MergeOps } from './gh-merge.js';
-import { repoOfUrl, sameRepo, scopeGh, type GhRunner } from './gh-scope.js';
+import { ForeignRows, repoOfUrl, sameRepo, scopeGh, type GhRunner } from './gh-scope.js';
 import { execFile } from 'node:child_process';
 import type { GhCheck, GhCloseReason, GhComment, GhIssue, GhIssueDetail, GhLabel, GhMergeMethod, GhPull, GhPullDetail, GhRepoInfo, GhReviewComment, GhState } from '../shared/protocol.js';
 import type { GhAs } from './signins.js';
@@ -195,7 +195,7 @@ export class GitHub {
       const named = repoOfUrl(r.url);
       return !named || sameRepo(named, this.scope);
     });
-    if (rows.length && !mine.length) throw new Error(`GitHub returned ${what} of ${repoOfUrl(rows[0].url)}, not of ${this.scope}, so none are shown.`);
+    if (rows.length && !mine.length) throw new ForeignRows(`GitHub returned ${what} of ${repoOfUrl(rows[0].url)}, not of ${this.scope}, so none are shown.`);
     return mine;
   }
 
@@ -514,7 +514,7 @@ export class GitHub {
       const items = this.claims.mark(this.relabel('issue', fetched, asked), asked);
       this.issues = { items, fetchedAt: Date.now(), loading: false };
     } catch (err) {
-      this.issues = { ...this.issues, loading: false, error: (err as Error).message, fetchedAt: Date.now() };
+      this.issues = { ...this.issues, ...(err instanceof ForeignRows ? { items: [] } : {}), loading: false, error: (err as Error).message, fetchedAt: Date.now() };
     }
     this.onIssues(this.issues);
   }
@@ -558,7 +558,9 @@ export class GitHub {
       this.extra = new Map(open.filter((p: any) => p.state === 'OPEN' && typeof p.headRefOid === 'string').map((p: any) => [p.number, { sha: p.headRefOid, mergeable: String(p.mergeable ?? 'UNKNOWN'), mergeState: String(p.mergeStateStatus ?? 'UNKNOWN'), ...(Array.isArray(p.files) ? { files: p.files.map((f: any) => String(f.path)) } : {}), fork: p.isCrossRepository === true, checks: (p.statusCheckRollup ?? []).map(checkOf) }]));
       this.pulls = { items, fetchedAt: Date.now(), loading: false };
     } catch (err) {
-      this.pulls = { ...this.pulls, loading: false, error: (err as Error).message, fetchedAt: Date.now() };
+      // Another repository's rows are never kept: what was shown before is cleared with the error, not left on the board. Only what is in memory is dropped; the next look refills it.
+      if (err instanceof ForeignRows) this.extra = new Map();
+      this.pulls = { ...this.pulls, ...(err instanceof ForeignRows ? { items: [] } : {}), loading: false, error: (err as Error).message, fetchedAt: Date.now() };
     }
     this.onPulls(this.pulls);
   }

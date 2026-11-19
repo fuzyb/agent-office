@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { GitHub } from '../src/server/github.js';
-import { NO_REPO, repoOfUrl, sameRepo, scoped, type GhRunner } from '../src/server/gh-scope.js';
+import { NO_REPO, repoOfUrl, sameRepo, scopeGh, scoped, type GhRunner } from '../src/server/gh-scope.js';
 import type { GhPull, GhState, GhIssue } from '../src/shared/protocol.js';
 
 // A fork's floor must show, and act on, the fork's pull requests and nothing else. The case that happened: a floor for
@@ -20,6 +20,8 @@ const issue = (repo: string, n: number) => ({ number: n, title: `Issue ${n} in $
  */
 function emulator(o: { leaky?: boolean; viewName?: string } = {}) {
   const calls: string[][] = [];
+  /** Every call that changes something on GitHub, and the repository it landed in. */
+  const mutations: { repo: string; args: string[] }[] = [];
   let defaulted = 0;
   const data: Record<string, { pulls: ReturnType<typeof row>[]; issues: ReturnType<typeof issue>[] }> = {
     [FORK]: { pulls: [1, 2, 3, 4, 5].map((n) => row(FORK, n, 'MERGED')), issues: [issue(FORK, 1)] },
@@ -39,6 +41,8 @@ function emulator(o: { leaky?: boolean; viewName?: string } = {}) {
       defaulted++;
       repo = UPSTREAM;
     }
+    const method = args.includes('--method') ? args[args.indexOf('--method') + 1] : 'GET';
+    if ((cmd === 'pr' && ['merge', 'close', 'edit', 'create', 'comment', 'review', 'ready'].includes(sub)) || (cmd === 'issue' && ['edit', 'close', 'create', 'comment', 'reopen', 'delete', 'transfer', 'lock', 'pin'].includes(sub)) || (cmd === 'api' && method !== 'GET')) mutations.push({ repo, args });
     const d = data[repo] ?? { pulls: [], issues: [] };
     if (cmd === 'repo') return JSON.stringify({ nameWithOwner: o.viewName ?? repo, squashMergeAllowed: true, mergeCommitAllowed: true, rebaseMergeAllowed: true });
     if (cmd === 'pr' && sub === 'list') {
@@ -48,9 +52,11 @@ function emulator(o: { leaky?: boolean; viewName?: string } = {}) {
     if (cmd === 'issue' && sub === 'list') return JSON.stringify(args[args.indexOf('--state') + 1] === 'open' ? d.issues : []);
     if (cmd === 'pr' && sub === 'view') return JSON.stringify(d.pulls.find((p) => String(p.number) === args[3] || String(p.number) === args[2]) ?? {});
     if (cmd === 'pr' && sub === 'merge') return '';
+    if (cmd === 'issue' && sub === 'view') return JSON.stringify({ number: Number(args.find((a) => /^d+$/.test(a))), state: 'OPEN', body: '', comments: [] });
+    if (cmd === 'api' && method !== 'GET') return JSON.stringify({ id: 1, html_url: 'x', user: { login: 'octocat' }, body: 'b', created_at: '', labels: [] });
     return '[]';
   };
-  return { run, calls, defaulted: () => defaulted };
+  return { run, calls, mutations, defaulted: () => defaulted };
 }
 
 const boards = (repo: string | undefined, run: GhRunner) => {
@@ -164,3 +170,67 @@ test('scoping rules: a call that names another repository, or none it can pin, i
   assert.ok(sameRepo('Fuzyb/Agent-Office', FORK) && !sameRepo(UPSTREAM, FORK) && !sameRepo(undefined, FORK) && !sameRepo('', ''));
   assert.deepEqual([repoOfUrl(`https://github.com/${UPSTREAM}/pull/409`), repoOfUrl('https://evil.example/fuzyb/agent-office/pull/1'), repoOfUrl(undefined)], [UPSTREAM, undefined, undefined]);
 });
+
+test('the Issues board is the floor’s own: its issues, and none of upstream’s, however it is asked', async () => {
+  const e = emulator();
+  const b = boards(FORK, e.run);
+  await b.refresh();
+  assert.deepEqual(b.issues()?.items.map((i) => i.number), [1]);
+  assert.ok(b.issues()?.items.every((i) => repoOfUrl(i.url) === FORK));
+  // Upstream's issues (#300, #301) are what an unscoped gh would have listed.
+  assert.deepEqual(JSON.parse(await emulator().run(['issue', 'list', '--state', 'open', '--json', 'number'], '/floor')).map((i: { number: number }) => i.number), [300, 301]);
+  // Both boards at once, from the same root: a gh that ignores the repository cannot put either upstream's on either board.
+  const leaky = boards(FORK, emulator({ leaky: true }).run);
+  await leaky.refresh();
+  assert.deepEqual([leaky.pulls()?.items.length, leaky.issues()?.items.length], [0, 0]);
+  assert.match(leaky.pulls()?.error ?? '', /pull requests of AgentSystemLabs/);
+  assert.match(leaky.issues()?.error ?? '', /issues of AgentSystemLabs/);
+});
+
+test('creating or changing an issue or a pull request, from any action the office has, lands in the floor’s repository and never in the upstream', async () => {
+  const e = emulator();
+  const b = boards(FORK, e.run);
+  await b.refresh();
+  await b.github.claim(1);
+  await b.github.close('issue', 1, { comment: 'done', reason: 'completed' });
+  await b.github.close('pull', 1, {});
+  await b.github.comment('issue', 1, 'a comment');
+  await b.github.comment('pull', 1, 'a comment');
+  await b.github.setLabels('issue', 1, ['bug'], ['old']);
+  await b.github.setLabels('pull', 1, ['bug'], []);
+  await b.github.review(1, 'a review').catch(() => undefined);
+  await b.github.issueDetail(1).catch(() => undefined);
+  await b.github.merge(1, 'squash', false, false);
+  assert.ok(e.mutations.length >= 8, `the office made its changes: ${e.mutations.length}`);
+  assert.deepEqual([...new Set(e.mutations.map((m) => m.repo))], [FORK], 'every change landed in the fork, none in the upstream');
+  assert.equal(e.defaulted(), 0);
+  // An action that names the upstream is refused before it runs, whoever asks.
+  for (const args of [['issue', 'edit', '300', '--repo', UPSTREAM, '--add-assignee', '@me'], ['issue', 'close', '300', '-R', UPSTREAM], ['pr', 'comment', '409', '--repo', UPSTREAM], ['api', '--method', 'POST', `repos/${UPSTREAM}/issues/300/comments`, '-f', 'body=x'], ['issue', 'create', '--repo', UPSTREAM, '--title', 'x']]) {
+    await assert.rejects(scopeGhFor(e.run)(args, '/floor'), /Refused/, args.join(' '));
+  }
+  assert.ok(e.mutations.every((m) => sameRepo(m.repo, FORK)));
+});
+
+test('what was shown from another repository is cleared, not left on the board, and nothing else is touched', async () => {
+  const stale = [row(UPSTREAM, 409), row(UPSTREAM, 407)].map((p) => ({ number: p.number, title: p.title, state: 'OPEN', url: p.url })) as unknown as GhPull[];
+  const staleIssues = [issue(UPSTREAM, 300)].map((i) => ({ number: i.number, title: i.title, state: 'OPEN', url: i.url })) as unknown as GhIssue[];
+  const b = boards(FORK, emulator({ leaky: true }).run);
+  const inner = b.github as unknown as { pulls: GhState<GhPull>; issues: GhState<GhIssue>; extra: Map<number, unknown> };
+  inner.pulls = { items: stale, fetchedAt: 1, loading: false };
+  inner.issues = { items: staleIssues, fetchedAt: 1, loading: false };
+  inner.extra.set(409, { sha: 'a'.repeat(40) });
+  await b.refresh();
+  assert.deepEqual([b.pulls()?.items, b.issues()?.items], [[], []], 'the upstream rows that were on the board are gone');
+  assert.equal(b.github.extras(409), undefined, 'and what was kept for them');
+  // A transient failure is not a reason to drop the board: only another repository's rows are.
+  const ok = boards(FORK, emulator().run);
+  await ok.refresh();
+  const before = ok.pulls()?.items.length;
+  const down = (ok.github as unknown as { runGh: GhRunner });
+  down.runGh = async () => { throw new Error('offline'); };
+  await ok.refresh();
+  assert.equal(ok.pulls()?.error, 'offline');
+  assert.equal(ok.pulls()?.items.length, before, 'the floor’s own rows stay while GitHub is unreachable');
+});
+
+const scopeGhFor = (run: GhRunner) => scopeGh(run, FORK);
