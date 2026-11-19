@@ -8,7 +8,7 @@ import { DEFAULT_MAX_FILES, DEFAULT_MAX_LINES, METHODS } from '../../shared/merg
 import type { AuditEntry, AuditKind, MergeApproval, MergeMode, RepoMergePolicy } from '../../shared/protocol/merge.js';
 
 const MODES: readonly MergeMode[] = ['off', 'approve', 'auto'];
-const KINDS: ReadonlySet<string> = new Set<AuditKind>(['decision', 'approval', 'revoked', 'attempt', 'merging', 'merged', 'blocked', 'policy', 'stop', 'resume']);
+const KINDS: ReadonlySet<string> = new Set<AuditKind>(['decision', 'approval', 'revoked', 'attempt', 'merging', 'merged', 'blocked', 'policy', 'stop', 'resume', 'assigned', 'routed', 'escalated']);
 
 interface SavedPolicy {
   repos: Record<string, RepoMergePolicy>;
@@ -166,7 +166,7 @@ export class MergePolicyStore {
           bases: p.bases.filter((b): b is string => typeof b === 'string').slice(0, 10),
           maxChangedLines: Number.isFinite(p.maxChangedLines) ? Math.max(1, Math.min(5000, Math.floor(p.maxChangedLines))) : DEFAULT_MAX_LINES,
           maxFiles: Number.isFinite(p.maxFiles) ? Math.max(1, Math.min(100, Math.floor(p.maxFiles))) : DEFAULT_MAX_FILES,
-          extraLowRisk: (p.extraLowRisk ?? []).filter((g): g is string => typeof g === 'string').slice(0, 20),
+          humanPaths: (p.humanPaths ?? []).filter((g): g is string => typeof g === 'string').slice(0, 20),
           authorization: p.authorization.slice(0, 300),
           authorizedBy: String(p.authorizedBy ?? '').slice(0, 64),
           authorizedAt: Number(p.authorizedAt) || 0,
@@ -184,7 +184,7 @@ export class FloorMergeStore {
   readonly approvals = new Map<number, MergeApproval>();
   private auditFile: string;
   private approvalsFile: string;
-  /** From the record, so they survive a restart: commits already merged, and attempts made per commit. */
+  /** From the record, so they survive a restart: commits already merged, and the times GitHub was asked to merge each commit. */
   readonly merged = new Set<string>();
   readonly attempts = new Map<string, number>();
 
@@ -195,7 +195,7 @@ export class FloorMergeStore {
       if (e.pr === undefined || !e.sha) continue;
       const key = `${e.pr}@${e.sha}`;
       if (e.kind === 'merged') this.merged.add(key);
-      if (e.kind === 'attempt') this.attempts.set(key, (this.attempts.get(key) ?? 0) + 1);
+      if (e.kind === 'merging') this.attempts.set(key, (this.attempts.get(key) ?? 0) + 1);
     }
     try {
       for (const a of JSON.parse(readFileSync(this.approvalsFile, 'utf8')) as MergeApproval[]) if (Number.isSafeInteger(a?.pr) && /^[0-9a-f]{7,64}$/.test(a.sha) && typeof a.by === 'string') this.approvals.set(a.pr, { pr: a.pr, sha: a.sha, by: a.by.slice(0, 64), at: Number(a.at) || 0 });
@@ -216,7 +216,7 @@ export class FloorMergeStore {
     if (e.pr !== undefined && e.sha) {
       const key = `${e.pr}@${e.sha}`;
       if (e.kind === 'merged') this.merged.add(key);
-      if (e.kind === 'attempt') this.attempts.set(key, (this.attempts.get(key) ?? 0) + 1);
+      if (e.kind === 'merging') this.attempts.set(key, (this.attempts.get(key) ?? 0) + 1);
     }
   }
 

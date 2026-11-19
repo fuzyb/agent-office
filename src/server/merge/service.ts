@@ -9,7 +9,8 @@
 // failure to ask: no merge, and a line in the audit saying why. GitHub is asked to refuse too (`--match-head-commit`).
 //
 // Nothing in here is reachable by an agent: it has no worker route, no MCP tool, and its messages are the browser's.
-import { classify, DEFAULT_MAX_FILES, DEFAULT_MAX_LINES, METHODS, validExtraGlob } from '../../shared/merge.js';
+import { financialReasons } from '../../shared/financial.js';
+import { classify, DEFAULT_MAX_FILES, DEFAULT_MAX_LINES, filesOfDiff, MAX_FILES, MAX_LINES, METHODS, STRICT_REVIEWS, validExtraGlob } from '../../shared/merge.js';
 import type { AuditEntry, AuditKind, MergeClassification, MergeMode, MergePr, MergeViewState, RepoMergePolicy } from '../../shared/protocol/merge.js';
 import type { GhPull } from '../../shared/protocol.js';
 import type { PrAssessment, QaViewState } from '../../shared/protocol/qa.js';
@@ -21,6 +22,8 @@ import { FloorMergeStore, PolicyWriteError, type MergePolicyStore } from './stor
 export interface MergeQaSource {
   state(): QaViewState;
   reassess(n: number): Promise<PrAssessment | undefined>;
+  /** Sends the problems of this exact commit back to the worker that wrote it (once per commit, only while automatic merging is on). */
+  requestCorrection(n: number, sha: string, problems: string[]): 'sent' | 'waiting' | 'escalated' | 'nothing';
 }
 
 export interface MergeDeps {
@@ -33,20 +36,32 @@ export interface MergeDeps {
   qa: MergeQaSource;
   pulls(): GhPull[];
   extras(n: number): PullExtra | undefined;
-  ops: Pick<MergeOps, 'pull' | 'canMerge' | 'merge'>;
+  ops: Pick<MergeOps, 'pull' | 'canMerge' | 'merge' | 'diff'>;
   checks: { requiredChecks(base: string, fresh?: boolean): Promise<string[] | null> };
   emit(state: MergeViewState): void;
   toast(text: string): void;
 }
 
+/** Times GitHub is asked to merge one commit and refuses, before a person is asked to look. A refusal before that (a rule not met yet) is just tried again. */
 const MAX_ATTEMPTS = 3;
 const RECENT = 40;
+const SCANS_KEPT = 300;
+
+/** What reading a commit's own diff found: what it says about billing and spending, and every path it names. */
+interface Scan {
+  money: string[];
+  files: string[];
+}
 
 export class MergeService {
   readonly store: FloorMergeStore;
   private inFlight = new Set<string>();
   private chain: Promise<unknown> = Promise.resolve();
   private said = new Set<string>();
+  /** The last reason each commit was refused for, so a pull request that keeps being refused for the same reason is written down once. */
+  private lastRefusal = new Map<string, string>();
+  private scans = new Map<string, Scan>();
+  private flagged = new Set<string>();
   private last = '';
 
   constructor(
@@ -76,9 +91,60 @@ export class MergeService {
     return { policy };
   }
 
+  /** Whether anything unattended may happen right now: the gate is open, nobody pressed stop, and this repository is switched on. */
+  on(): boolean {
+    return typeof this.active() !== 'string';
+  }
+
   private classification(p: GhPull, policy: RepoMergePolicy | undefined): MergeClassification {
     const x = this.d.extras(p.number);
-    return classify({ files: x?.files, lines: p.additions + p.deletions, base: p.baseRefName, fork: x?.fork ?? false }, policy ?? { bases: ['main'], maxChangedLines: DEFAULT_MAX_LINES, maxFiles: DEFAULT_MAX_FILES, extraLowRisk: [] });
+    const scan = p.headRefOid ? this.scans.get(p.headRefOid) : undefined;
+    const files = x?.files ? [...new Set([...x.files, ...(scan?.files ?? [])])] : undefined;
+    return classify({ files, lines: p.additions + p.deletions, base: p.baseRefName, fork: x?.fork ?? false, title: p.title, ...(scan ? { diffMoney: scan.money } : {}) }, policy ?? { bases: ['main'], maxChangedLines: DEFAULT_MAX_LINES, maxFiles: DEFAULT_MAX_FILES, humanPaths: [] });
+  }
+
+  /** Reads the change of exactly this commit from GitHub and remembers what it says about billing and spending. Throws if it cannot be read. */
+  private async read(base: string, sha: string): Promise<Scan> {
+    const diff = await this.d.ops.diff(base, sha);
+    const scan: Scan = { money: financialReasons({ diff }), files: filesOfDiff(diff) };
+    this.scans.delete(sha);
+    this.scans.set(sha, scan);
+    for (const k of this.scans.keys()) {
+      if (this.scans.size <= SCANS_KEPT) break;
+      this.scans.delete(k);
+    }
+    return scan;
+  }
+
+  /** Reads the changes of the open pull requests not read yet (once per commit), while automatic merging is on, so billing and spending are ruled out before any review is asked for. */
+  async scan(items: GhPull[]): Promise<void> {
+    if (typeof this.active() === 'string') return;
+    for (const p of items) {
+      if (p.state !== 'OPEN' || p.isDraft || !p.headRefOid || this.scans.has(p.headRefOid) || !this.d.extras(p.number)) continue;
+      try {
+        await this.read(p.baseRefName, p.headRefOid);
+      } catch {
+        // not read: it is not handled unattended until it is (it is asked again at the next sync, and again before any merge)
+      }
+    }
+  }
+
+  /** What QA may do unattended for this exact commit: true, or why not. Never for billing, payments, subscriptions, spending, the rules themselves, or what is not fully known. */
+  allows(n: number, sha: string): true | string {
+    const on = this.active();
+    if (typeof on === 'string') return on;
+    const p = this.d.pulls().find((x) => x.number === n && x.state === 'OPEN');
+    if (!p || p.headRefOid !== sha) return 'it is not the head that was asked about';
+    if (!this.scans.has(sha)) return 'its changes have not been read yet, so billing and spending are not ruled out';
+    const c = this.classification(p, on.policy);
+    return c.verdict === 'eligible' ? true : c.reasons[0];
+  }
+
+  /** QA gave a review, sent a problem back to its author, or found nobody who can: into the record (and, when a person is needed, to the owner). */
+  record(kind: 'assigned' | 'routed' | 'escalated', n: number, sha: string, reasons: string[]) {
+    this.tryWrite(kind, 'office', { pr: n, sha, ok: kind !== 'escalated', reasons });
+    if (kind === 'escalated') this.d.toast(`🧑 PR #${n} needs a person: ${reasons[0]}`);
+    this.push();
   }
 
   state(): MergeViewState {
@@ -95,6 +161,7 @@ export class MergeService {
       let reasons: string[] = c.reasons;
       if (this.store.merged.has(key)) [status, reasons] = ['merged', ['merged by the office']];
       else if (c.verdict === 'human') status = 'human';
+      else if (policy && policy.mode !== 'off' && !this.scans.has(q.sha)) [status, reasons] = ['not-ready', ['its changes are being read, to rule out billing and spending']];
       else if (q.state !== 'ready') [status, reasons] = ['not-ready', [`QA says: ${q.state}${q.reasons[0] ? ` (${q.reasons[0]})` : ''}`]];
       else if (policy?.mode === 'approve' && !mine) [status, reasons] = ['awaiting-approval', ['eligible: waiting for a person to approve this commit']];
       else status = this.inFlight.has(key) ? 'queued' : this.said.has(`blocked:${key}`) ? 'blocked' : 'queued';
@@ -140,7 +207,7 @@ export class MergeService {
   // --- What the owner controls -----------------------------------------------------------------------------------------------------------
 
   /** Admin only (the caller checks). Turns automatic merging on for THIS floor's repository, or off. */
-  setPolicy(by: string, input: { mode: MergeMode; authorization?: string; method?: string; bases?: string[]; maxChangedLines?: number; maxFiles?: number; extraLowRisk?: string[] }): { ok: boolean; message: string } {
+  setPolicy(by: string, input: { mode: MergeMode; authorization?: string; method?: string; bases?: string[]; maxChangedLines?: number; maxFiles?: number; humanPaths?: string[] }): { ok: boolean; message: string } {
     const repo = this.d.repo();
     if (!repo) return { ok: false, message: 'This floor has no GitHub repository, so there is nothing to switch on' };
     if (input.mode === 'off') {
@@ -163,11 +230,11 @@ export class MergeService {
     if (!method) return { ok: false, message: 'method is squash, merge or rebase' };
     const bases = (input.bases?.length ? input.bases : ['main']).map((b) => b.trim()).filter((b) => /^[\w./-]{1,100}$/.test(b)).slice(0, 10);
     if (!bases.length) return { ok: false, message: 'Name the branches it may merge into' };
-    const extra = (input.extraLowRisk ?? []).map((g) => g.trim()).filter(Boolean);
+    const extra = (input.humanPaths ?? []).map((g) => g.trim()).filter(Boolean);
     const badGlob = extra.find((g) => !validExtraGlob(g));
     if (badGlob) return { ok: false, message: `“${badGlob}” is not a path pattern it accepts (no “everything”, no “..”)` };
     const clamp = (v: unknown, lo: number, hi: number, d: number) => (typeof v === 'number' && Number.isFinite(v) ? Math.max(lo, Math.min(hi, Math.floor(v))) : d);
-    const policy: RepoMergePolicy = { mode: input.mode, method: method as RepoMergePolicy['method'], bases, maxChangedLines: clamp(input.maxChangedLines, 1, 5000, DEFAULT_MAX_LINES), maxFiles: clamp(input.maxFiles, 1, 100, DEFAULT_MAX_FILES), extraLowRisk: extra.slice(0, 20), authorization: authorization.slice(0, 300), authorizedBy: by, authorizedAt: Date.now() };
+    const policy: RepoMergePolicy = { mode: input.mode, method: method as RepoMergePolicy['method'], bases, maxChangedLines: clamp(input.maxChangedLines, 1, MAX_LINES, DEFAULT_MAX_LINES), maxFiles: clamp(input.maxFiles, 1, MAX_FILES, DEFAULT_MAX_FILES), humanPaths: extra.slice(0, 20), authorization: authorization.slice(0, 300), authorizedBy: by, authorizedAt: Date.now() };
     try {
       this.d.policy.set(repo, policy);
     } catch (e) {
@@ -243,10 +310,25 @@ export class MergeService {
   /** QA has recomputed: merge whatever is ready, eligible and (in approve mode) approved, one at a time. Nothing waits on a timer. */
   onQa(): Promise<void> {
     this.push();
-    if (typeof this.active() === 'string') return Promise.resolve();
+    const on = this.active();
+    if (typeof on === 'string') return Promise.resolve();
+    this.flagPeople(on.policy);
     const ready = this.d.qa.state().prs.filter((q) => q.state === 'ready');
     for (const q of ready) this.chain = this.chain.then(() => this.attempt(q.number)).catch(() => undefined);
     return this.chain.then(() => undefined);
+  }
+
+  /** Once per commit: a pull request that is not the office's to merge (money, the rules themselves, not fully known) is written down and shown to the owner. */
+  private flagPeople(policy: RepoMergePolicy) {
+    for (const p of this.d.pulls()) {
+      if (p.state !== 'OPEN' || p.isDraft || !p.headRefOid || !this.d.extras(p.number)) continue;
+      const c = this.classification(p, policy);
+      if (c.verdict !== 'human' || (!c.hard && !this.scans.has(p.headRefOid))) continue;
+      const key = `${p.number}@${p.headRefOid}`;
+      if (this.flagged.has(key)) continue;
+      this.flagged.add(key);
+      this.record('escalated', p.number, p.headRefOid, c.reasons);
+    }
   }
 
   /** One attempt to merge pull request `n`: decide, then ask everything again, then merge or refuse. Returns what happened. */
@@ -261,7 +343,10 @@ export class MergeService {
     const key = `${n}@${sha}`;
     const refuse = (reasons: string[], kind: AuditKind = 'blocked') => {
       this.said.add(`blocked:${key}`);
-      this.write(kind, 'office', { pr: n, sha, ok: false, reasons });
+      if (this.lastRefusal.get(key) !== reasons.join('|')) {
+        this.lastRefusal.set(key, reasons.join('|'));
+        this.write(kind, 'office', { pr: n, sha, ok: false, reasons });
+      }
       this.push();
       return { merged: false, message: reasons[0] };
     };
@@ -285,7 +370,13 @@ export class MergeService {
     // Duplicates: one attempt at a time for a commit, none once it merged, a few at most.
     if (this.store.merged.has(key)) return { merged: false, message: 'duplicate: this commit was already merged' };
     if (this.inFlight.has(key)) return { merged: false, message: 'duplicate: an attempt for this commit is already running' };
-    if ((this.store.attempts.get(key) ?? 0) >= MAX_ATTEMPTS) return refuse([`gave up after ${MAX_ATTEMPTS} attempts at this commit: a person looks at it`]);
+    if ((this.store.attempts.get(key) ?? 0) >= MAX_ATTEMPTS) {
+      if (!this.flagged.has(`gave-up:${key}`)) {
+        this.flagged.add(`gave-up:${key}`);
+        this.d.toast(`🧑 PR #${n} needs a person: GitHub refused ${MAX_ATTEMPTS} merge attempts`);
+      }
+      return refuse([`gave up after GitHub refused ${MAX_ATTEMPTS} merge attempts at this commit: a person looks at it`]);
+    }
     this.inFlight.add(key);
     // The policy and the stop as they are when this begins. If either changes before the merge call, even if it changes back (a
     // stop and then a resume), this attempt is void: the world it checked is not the world it would merge in.
@@ -295,7 +386,7 @@ export class MergeService {
     const MOVED = ['the policy or the emergency stop changed during verification: this attempt is void'];
     try {
       this.decide(n, sha, true, [...c.reasons, `policy: ${policy.mode}, ${policy.method}`]);
-      this.write('attempt', 'office', { pr: n, sha, reasons: ['revalidating before merging'] });
+      if (!this.lastRefusal.has(key)) this.write('attempt', 'office', { pr: n, sha, reasons: ['revalidating before merging'] });
 
       // 1. Everything again, from GitHub, not from the last sync.
       let fresh;
@@ -310,6 +401,16 @@ export class MergeService {
       if (fresh.head !== sha) return refuse([`the head moved to ${fresh.head.slice(0, 7)} during verification; everything about ${sha.slice(0, 7)} is void`]);
       if (fresh.fork) return refuse(['it comes from a fork']);
       if (!policy.bases.includes(fresh.base) || fresh.base !== q.base) return refuse([`it targets ${fresh.base}, which the policy does not cover`]);
+      // The change itself, read again from GitHub, pinned to this commit: billing, payments, subscriptions and spending are never merged unattended.
+      try {
+        await this.read(fresh.base, sha);
+      } catch {
+        return refuse(['could not read the changes of this commit, so billing and spending could not be ruled out: a person decides']);
+      }
+      if (moved()) return refuse(MOVED);
+      const again1 = this.classification(p, policy);
+      if (again1.verdict !== 'eligible') return refuse(again1.reasons);
+      const tier = again1.tier;
       let canMerge: boolean;
       try {
         canMerge = await this.d.ops.canMerge();
@@ -326,7 +427,11 @@ export class MergeService {
       }
       if (moved()) return refuse(MOVED);
       if (required === null || required.length === 0) return refuse([`${fresh.base} has no readable branch protection with required checks, so GitHub would not enforce them: a person merges this`]);
-      if (fresh.mergeable !== 'MERGEABLE' || fresh.mergeState !== 'CLEAN') return refuse([`GitHub does not call it mergeable (${fresh.mergeable}, ${fresh.mergeState}): the branch's rules or its state say no, and the office does not get round them`]);
+      if (fresh.mergeable !== 'MERGEABLE' || fresh.mergeState !== 'CLEAN') {
+        // Behind its base or conflicting is something its author can fix; any other rule is not the office's to get round.
+        if (fresh.mergeState === 'BEHIND' || fresh.mergeState === 'DIRTY' || fresh.mergeable === 'CONFLICTING') this.d.qa.requestCorrection(n, sha, [`GitHub says the branch is ${fresh.mergeState.toLowerCase()} (${fresh.mergeable.toLowerCase()}) relative to ${fresh.base}: update or rebase it onto ${fresh.base} and push`]);
+        return refuse([`GitHub does not call it mergeable (${fresh.mergeable}, ${fresh.mergeState}): the branch's rules or its state say no, and the office does not get round them`]);
+      }
       // 2. QA, worked out again now: the checks of exactly this commit, and an independent review of exactly this commit.
       let again: PrAssessment | undefined;
       try {
@@ -337,7 +442,11 @@ export class MergeService {
       if (moved()) return refuse(MOVED);
       if (!again || again.sha !== sha) return refuse(['the head moved while the review and checks were confirmed']);
       if (again.state !== 'ready') return refuse([`not ready any more: ${again.state}${again.reasons[0] ? ` (${again.reasons[0]})` : ''}`]);
-      if (!again.evidence.some((e) => e.status === 'counts' && e.sha === sha)) return refuse(['no independent review of this exact commit']);
+      const counting = again.evidence.filter((e) => e.status === 'counts' && e.sha === sha);
+      if (!counting.length) return refuse(['no independent review of this exact commit']);
+      // A sensitive technical change is verified harder: a person's review, or STRICT_REVIEWS different reviewers, each of this exact commit.
+      const reviewers = new Set(counting.map((e) => (e.kind === 'human' ? `human:${e.by ?? e.id}` : `worker:${e.reviewerId ?? e.id}`)));
+      if (tier === 'strict' && !counting.some((e) => e.kind === 'human') && reviewers.size < STRICT_REVIEWS) return refuse([`a sensitive change needs ${STRICT_REVIEWS} independent reviewers of this exact commit, and it has ${reviewers.size}`]);
       // 3. The last look, with nothing awaited between it and the merge call: stop, gate, policy, approval.
       if (moved()) return refuse(MOVED);
       const last = this.active();
@@ -367,6 +476,7 @@ export class MergeService {
       this.write('merged', 'office', { pr: n, sha, ok: true, ...(after?.mergeCommit ? { mergeCommit: after.mergeCommit } : {}), reasons: [`merged by the office (${last.policy.method}), authorized by ${last.policy.authorizedBy}: ${last.policy.authorization}`] });
       this.store.approvals.delete(n);
       this.store.saveApprovals();
+      this.lastRefusal.delete(key);
       this.d.toast(`🔀 PR #${n} was merged automatically (${sha.slice(0, 7)})`);
       this.push();
       return { merged: true, message: 'merged' };

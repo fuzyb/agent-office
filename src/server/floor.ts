@@ -227,7 +227,12 @@ export class Floor {
         this.queue?.onPulls(state.items);
         if (state.loading || state.error) return;
         // The sync just reported: work out where each pull request stands. No timer of its own, nothing asked of a model.
-        void this.qa?.onPulls(state.items).then(() => this.merge?.onQa());
+        // Read the changes of new commits (so billing and spending are ruled out before any review), then QA, then merging: one after the other, each when the sync reports.
+        void (async () => {
+          await this.merge?.scan(state.items);
+          await this.qa?.onPulls(state.items);
+          await this.merge?.onQa();
+        })().catch(() => undefined);
         // A worker may have opened one from a branch it made itself, mid-turn or from a shell.
         void this.workers.syncBranches();
         for (const p of this.merges.look(state.items)) {
@@ -263,6 +268,8 @@ export class Floor {
     this.qa = new QaService(dataDir, this, () => ({ floors: () => [this], planLimits: () => ctx.planLimits() }), this.github, { emit: (state) => ctx.emit(this, { t: 'qa.state', state }, true), toast: (text) => ctx.toast(this, text) });
 
     this.merge = new MergeService(dataDir, { floorId: this.id, repo: () => def.repo, gate: () => gateOpen(), policy: ctx.mergePolicy, qa: this.qa, pulls: () => this.github.pulls.items, extras: (n) => this.github.extras(n), ops: this.github.ops, checks: this.github, emit: (state) => ctx.emit(this, { t: 'merge.state', state }, true), toast: (text) => ctx.toast(this, text) });
+    // QA acts unattended (reviews to idle reviewers, failures back to the author) only while automatic merging is on, and never for billing, spending or the rules themselves.
+    this.qa.autopilot = { on: () => this.merge.on(), allows: (n, sha) => this.merge.allows(n, sha), note: (kind, n, sha, reasons) => this.merge.record(kind, n, sha, reasons) };
 
     // Meetings seat their own workers round the meeting room's table and run them round by round.
     const workers = this.workers;

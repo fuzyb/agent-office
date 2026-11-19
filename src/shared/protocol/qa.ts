@@ -112,14 +112,16 @@ export interface PrAssessment {
   assigned?: { workerName: string; at: number };
   /** Whether a person's own review is what it needs (a security or policy rule). */
   needsHuman: boolean;
+  /** Independent reviews of this exact commit it needs: 1, or more for a sensitive technical area while automatic merging is on. */
+  reviewsNeeded: number;
   updatedAt: string;
 }
 
 export interface QaPolicy {
-  /** Always 'human': nothing here merges. */
-  merge: 'human';
-  /** Always false: no model-driven watching, no automatic review. */
-  autoReview: false;
+  /** 'human' unless automatic merging is on for this repository (see docs/auto-merge.md): then ready pull requests are merged by the office. */
+  merge: 'human' | 'auto';
+  /** True only while automatic merging is on: reviews are then given to idle QA Engineers and Reviewers, and failures are sent back to the author. Never a model, never a hire. */
+  autoReview: boolean;
   /** Whether the board's checks were compared with the repository's required ones (it may not say). */
   requiredKnown: boolean;
 }

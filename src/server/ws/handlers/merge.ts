@@ -21,7 +21,7 @@ export const mergeHandlers = {
       floor.merge.denied(who, 'change the automatic merge policy');
       return ctx.sendTo(c, { t: 'merge.result', ok: false, message: 'Only admins can change the automatic merge policy' });
     }
-    const r = floor.merge.setPolicy(who, { mode: msg.mode, authorization: str(msg.authorization, 300), method: str(msg.method, 10) || undefined, bases: strings(msg.bases, 10), maxChangedLines: num(msg.maxChangedLines) || undefined, maxFiles: num(msg.maxFiles) || undefined, extraLowRisk: strings(msg.extraLowRisk, 20) });
+    const r = floor.merge.setPolicy(who, { mode: msg.mode, authorization: str(msg.authorization, 300), method: str(msg.method, 10) || undefined, bases: strings(msg.bases, 10), maxChangedLines: num(msg.maxChangedLines) || undefined, maxFiles: num(msg.maxFiles) || undefined, humanPaths: strings(msg.humanPaths, 20) });
     ctx.sendTo(c, { t: 'merge.result', ok: r.ok, message: r.message });
   },
   async 'merge.approve'(ctx, c, msg) {

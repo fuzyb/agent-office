@@ -12,9 +12,22 @@ export interface AuthorsSeen {
   providers: (string | undefined)[];
 }
 
+/** What the office did about a pull request's problems by itself, once per commit: sent them to the author, or said a person has to look. */
+export interface QaRoute {
+  pr: number;
+  sha: string;
+  kind: 'correction' | 'escalated';
+  workerId?: string;
+  workerName?: string;
+  taskId?: string;
+  at: number;
+  why: string[];
+}
+
 interface Saved {
   evidence: QaEvidence[];
   assignments: QaAssignment[];
+  routes?: QaRoute[];
   authors: Record<string, AuthorsSeen>;
 }
 
@@ -24,6 +37,7 @@ const VERDICTS = new Set(['approve', 'changes', 'comment']);
 export class QaStore {
   evidence: QaEvidence[] = [];
   assignments: QaAssignment[] = [];
+  routes: QaRoute[] = [];
   authors = new Map<number, AuthorsSeen>();
   private file: string;
 
@@ -36,7 +50,8 @@ export class QaStore {
     // The oldest go first: a floor keeps a few hundred reviews, which is a long while at the pace reviews are made.
     this.evidence = this.evidence.slice(-KEEP);
     this.assignments = this.assignments.slice(-KEEP);
-    const saved: Saved = { evidence: this.evidence, assignments: this.assignments, authors: Object.fromEntries(this.authors) };
+    this.routes = this.routes.slice(-KEEP);
+    const saved: Saved = { evidence: this.evidence, assignments: this.assignments, routes: this.routes, authors: Object.fromEntries(this.authors) };
     try {
       writeFileSync(this.file, JSON.stringify(saved, null, 2), { mode: 0o600 });
     } catch {
@@ -56,6 +71,10 @@ export class QaStore {
       for (const a of raw.assignments ?? []) {
         if (typeof a?.id !== 'string' || !Number.isSafeInteger(a.pr) || typeof a.sha !== 'string' || typeof a.workerId !== 'string' || typeof a.taskId !== 'string') continue;
         this.assignments.push({ id: a.id, pr: a.pr, sha: a.sha, workerId: a.workerId, workerName: str(a.workerName, 64) ?? '', workerProvider: a.workerProvider, taskId: a.taskId, by: str(a.by, 64) ?? '', at: Number(a.at) || 0, ...(typeof a.evidenceId === 'string' ? { evidenceId: a.evidenceId } : {}), ...(a.closed === 'stale' ? { closed: 'stale' as const } : {}) });
+      }
+      for (const r of raw.routes ?? []) {
+        if (!Number.isSafeInteger(r?.pr) || typeof r.sha !== 'string' || (r.kind !== 'correction' && r.kind !== 'escalated')) continue;
+        this.routes.push({ pr: r.pr, sha: r.sha, kind: r.kind, ...(typeof r.workerId === 'string' ? { workerId: r.workerId } : {}), ...(typeof r.workerName === 'string' ? { workerName: r.workerName.slice(0, 64) } : {}), ...(typeof r.taskId === 'string' ? { taskId: r.taskId } : {}), at: Number(r.at) || 0, why: (r.why ?? []).filter((x) => typeof x === 'string').map((x) => x.slice(0, 300)).slice(0, 10) });
       }
       for (const [n, v] of Object.entries(raw.authors ?? {})) {
         if (Number.isSafeInteger(Number(n)) && Array.isArray(v?.ids)) this.authors.set(Number(n), { ids: v.ids.filter((x) => typeof x === 'string'), names: (v.names ?? []).filter((x) => typeof x === 'string'), providers: v.providers ?? [] });

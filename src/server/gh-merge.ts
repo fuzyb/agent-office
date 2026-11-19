@@ -52,6 +52,12 @@ export class MergeOps {
     return p.push === true || p.maintain === true || p.admin === true;
   }
 
+  /** The change `sha` makes on `base`, as GitHub's unified diff, pinned to that commit (not a diff that moves with the pull request). Read-only. */
+  async diff(base: string, sha: string): Promise<string> {
+    if (!/^[0-9a-f]{7,64}$/.test(sha) || !/^[w./-]{1,100}$/.test(base)) throw new Error('not a commit and a branch');
+    return this.run(['api', '-H', 'Accept: application/vnd.github.diff', `repos/{owner}/{repo}/compare/${base}...${sha}`], this.dir);
+  }
+
   /** Merges, or throws with GitHub's reason (head moved, branch rule not met, not mergeable...). */
   async merge(n: number, sha: string, method: MergeMethod): Promise<void> {
     await this.run(['pr', 'merge', String(n), FLAG[method], '--match-head-commit', sha], this.dir);

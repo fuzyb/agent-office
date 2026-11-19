@@ -36,7 +36,7 @@ export function mergeView(net: Net, draw: () => void): MergeView {
   const badge = (n: number): HTMLElement | null => {
     const p = find(n);
     if (!state?.gate || !p) return null;
-    const text = p.status === 'human' ? `🧑 needs a person to merge: ${p.reasons[0]}` : p.status === 'awaiting-approval' ? '⏳ eligible for automatic merging: waiting for a person to approve this commit' : p.status === 'merged' ? '🔀 merged automatically' : p.status === 'queued' ? '🤖 eligible for automatic merging' : p.status === 'blocked' ? `⛔ refused at the last check: ${p.reasons[0]}` : `· not yet (${p.reasons[0] ?? p.qa})`;
+    const text = p.status === 'human' ? `🧑 needs a person to merge: ${p.reasons[0]}` : p.status === 'awaiting-approval' ? '⏳ eligible for automatic merging: waiting for a person to approve this commit' : p.status === 'merged' ? '🔀 merged automatically' : p.status === 'queued' ? `🤖 eligible for automatic merging${p.classification.tier === 'strict' ? ' (sensitive area: stronger QA, two independent reviews)' : ''}` : p.status === 'blocked' ? `⛔ refused at the last check: ${p.reasons[0]}` : `· not yet (${p.reasons[0] ?? p.qa})`;
     return h('div.reason', {}, text, p.status === 'awaiting-approval' && admin() ? h('button.btn.primary', { type: 'button', onclick: () => net.send({ t: 'merge.approve', pr: p.number, sha: p.sha }) }, `Approve merging ${p.sha.slice(0, 7)}`) : null, p.approval ? h('span', {}, ` approved by ${p.approval.by}`) : null);
   };
 
@@ -50,16 +50,16 @@ export function mergeView(net: Net, draw: () => void): MergeView {
     const method = h('select', { 'aria-label': 'Merge method' }, ...['squash', 'merge', 'rebase'].map((m) => h('option', { value: m }, m))) as HTMLSelectElement;
     method.value = pol?.method ?? 'squash';
     const bases = h('input', { type: 'text', value: (pol?.bases ?? ['main']).join(', '), 'aria-label': 'Branches' }) as HTMLInputElement;
-    const extra = h('input', { type: 'text', value: (pol?.extraLowRisk ?? []).join(', '), placeholder: 'Extra low-risk paths, e.g. src/client/ui/**', 'aria-label': 'Extra low-risk paths' }) as HTMLInputElement;
+    const extra = h('input', { type: 'text', value: (pol?.humanPaths ?? []).join(', '), placeholder: 'Paths that always need a person, e.g. src/legal/**', 'aria-label': 'Paths that always need a person' }) as HTMLInputElement;
     const save = h('button.btn.primary', { type: 'button' }, 'Save policy');
-    save.addEventListener('click', () => net.send({ t: 'merge.policy', mode: mode.value as MergeMode, authorization: auth.value, method: method.value as 'squash', bases: bases.value.split(',').map((s) => s.trim()).filter(Boolean), extraLowRisk: extra.value.split(',').map((s) => s.trim()).filter(Boolean) }));
+    save.addEventListener('click', () => net.send({ t: 'merge.policy', mode: mode.value as MergeMode, authorization: auth.value, method: method.value as 'squash', bases: bases.value.split(',').map((s) => s.trim()).filter(Boolean), humanPaths: extra.value.split(',').map((s) => s.trim()).filter(Boolean) }));
     const waiting = state.prs.filter((p) => p.status === 'awaiting-approval');
     return h(
       'div.qa-merge',
       {},
       h('h4', {}, '🔀 Automatic merging', h('span.count', {}, state.repo ?? 'no repository')),
       state.stopped ? h('p.note.warn', { role: 'alert' }, `🛑 Emergency stop: ${state.stopped.by} stopped all automatic merging ${timeAgo(state.stopped.at)}${state.stopped.reason ? ` (${state.stopped.reason})` : ''}.`, admin() ? h('button.btn', { type: 'button', onclick: () => net.send({ t: 'merge.resume' }) }, 'Resume') : null) : null,
-      h('p.note', {}, `${state.repo ?? 'This floor'}: ${pol ? MODE_LABEL[pol.mode] : 'off'}.`, pol ? ` Authorized by ${pol.authorizedBy} ${timeAgo(pol.authorizedAt)}: ${pol.authorization}.` : ' Nothing merges unless an admin turns it on with a written authorization.', ' Only documentation, tests and paths marked low-risk qualify; CI, installs, dependencies, security, configuration and unknown files always need a person. Every merge is asked about again, from GitHub, just before.'),
+      h('p.note', {}, `${state.repo ?? 'This floor'}: ${pol ? MODE_LABEL[pol.mode] : 'off'}.`, pol ? ` Authorized by ${pol.authorizedBy} ${timeAgo(pol.authorizedAt)}: ${pol.authorization}.` : ' Nothing merges unless an admin turns it on with a written authorization.', ' Code, infrastructure, security, dependencies and CI can merge once verified (sensitive ones need two independent reviews); billing, payments, subscriptions and spending, the merge rules themselves, forks and anything not fully known always need a person. Every merge is asked about again, from GitHub, just before.'),
       h('div.qa-actions', {}, h('button.btn', { type: 'button', title: 'Stops every automatic merge in the office at once', onclick: () => net.send({ t: 'merge.stop' }) }, '🛑 Emergency stop')),
       admin() && state.repo ? h('div.qa-record', {}, mode, auth, method, bases, extra, save) : h('p.note', {}, 'Only admins change the policy.'),
       state.allowlist.length ? h('p.note', {}, `Switched on for: ${state.allowlist.map((a) => `${a.repo} (${a.mode})`).join(', ')}`) : null,

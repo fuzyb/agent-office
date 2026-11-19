@@ -1,37 +1,49 @@
-// Which pull requests may be merged without a person reading them, decided from the changed files alone by
-// plain code. The rule is an allowlist: a change qualifies only if EVERY file is low-risk (documentation, tests,
-// or a path the owner added for that repository) and NONE is sensitive. Sensitive wins over everything: the
-// owner's extra paths can never include one. A change qualifies only when its whole file list is known.
+// Which pull requests may be merged without a person, decided from the change by plain code. The owner's policy is
+// broad: application code, infrastructure, security, dependencies and CI are all eligible, because they are verified
+// harder, not because they are trusted. A change is NOT eligible, and a person merges it, only when:
+//   - it touches billing, payments, subscriptions, spending or any financial commitment (shared/financial.ts); this
+//     can never be switched off by any policy, approval or review;
+//   - it touches governance or the safeguards themselves (see GOVERNANCE): the office never merges unattended a change to
+//     the rules it is merged under, to the code that decides what merges, or to how reviews are judged;
+//   - the whole change is not known (a file list that is missing or cut off), or it is from a fork, or aimed at a
+//     branch the policy does not name, or larger than the policy's limits, or touches a path the owner listed.
+// A change that touches a sensitive technical area (CI, installs, dependencies, security, infrastructure,
+// configuration, keys) is eligible at the STRICT tier: it needs more independent review (see STRICT_REVIEWS), not a person.
 //
-// Whether a qualifying change IS merged is another matter (server/merge/): the policy, the gate, the checks and
-// the independent review of the exact commit, all asked again immediately before.
+// Whether an eligible change IS merged is another matter (server/merge/): the policy, the gate, the checks, the
+// independent review(s) of the exact commit, and everything asked of GitHub again immediately before.
 //
 // Browser-safe: no node imports.
-import { FILES_SEEN_MAX, NEEDS_HUMAN, riskOf } from './qa.js';
+import { financialReasons } from './financial.js';
+import { FILES_SEEN_MAX, STRICT_REVIEWS, isSensitive } from './qa.js';
 import type { MergeClassification, MergeMethod, RepoMergePolicy } from './protocol/merge.js';
 
-export const DEFAULT_MAX_LINES = 300;
-export const DEFAULT_MAX_FILES = 20;
+export const DEFAULT_MAX_LINES = 2000;
+export const DEFAULT_MAX_FILES = 60;
+export const MAX_LINES = 5000;
+export const MAX_FILES = FILES_SEEN_MAX - 1;
 export const METHODS: readonly MergeMethod[] = ['squash', 'merge', 'rebase'];
 
-/** Paths that are never low-risk, whatever the owner adds: configuration, CI, installs, dependencies, secrets, governance, build and test infrastructure. */
-const PROTECTED: RegExp[] = [
-  /^\.github\//i,
-  /^\.claude\//i,
-  /^(AGENTS|CLAUDE|CODEOWNERS|SECURITY|GOVERNANCE)(\.md)?$/i,
-  /^(roles|playbooks|templates|projects|private)\//i,
-  /^(install\.(sh|ps1)|Dockerfile[^/]*|docker-compose[^/]*)$/i,
-  /^(bin|deploy|infra|infrastructure|terraform|k8s|helm|scripts)\//i,
-  /(^|\/)(package(-lock)?\.json|npm-shrinkwrap\.json|yarn\.lock|pnpm-lock\.yaml|\.npmrc|\.yarnrc[^/]*)$/i,
-  /(^|\/)(tsconfig[^/]*\.json|vite\.config\.[a-z]+|eslint[^/]*|\.eslintrc[^/]*|\.prettierrc[^/]*|\.gitignore|\.gitattributes|\.editorconfig)$/i,
-  /(^|\/)\.env/i,
-  /(^|\/)[^/]*\.(pem|key|crt|p12|pfx)$/i,
-  /(^|\/)(secrets?|credentials?)[^/]*$/i,
-  /^[^/]+\.(ya?ml|toml|ini|cfg)$/i, // configuration files at the root
-];
+export { STRICT_REVIEWS, isSensitive };
 
-/** Low-risk without the owner saying so: documentation and tests. */
-const LOW_RISK: RegExp[] = [/^docs\/[^]*\.(md|mdx|txt|png|svg|jpg)$/i, /^[^/]+\.(md|mdx)$/i, /(^|\/)tests?\//i, /\.(test|spec)\.[tj]sx?$/i];
+/**
+ * Where a change is a person's, whatever the owner's policy says: the rules the office works under (HQ governance and
+ * the agent configuration), and the code that decides what merges and who reviewed it, so that the safeguards cannot be
+ * edited by the thing they safeguard. Changing them is a deliberate, human act.
+ */
+const GOVERNANCE: RegExp[] = [
+  /^\.claude\//i,
+  /^(AGENTS|CLAUDE|SECURITY|GOVERNANCE)(\.md)?$/i,
+  /(^|\/)CODEOWNERS$/i,
+  /^(roles|playbooks|templates|projects|private)\//i,
+  // the merge machinery, its financial classifier and gate, the QA code that judges reviews, and their tests and docs
+  /^src\/(shared|server|client)\/(ui\/)?(protocol\/)?(merge|financial)(\/|\.ts$)/i,
+  /^src\/server\/(ws\/handlers\/merge|gh-merge|gh-checks)\.ts$/i,
+  /^src\/server\/(qa|merge)\//i,
+  /^src\/shared\/(qa|protocol\/qa)\.ts$/i,
+  /^tests\/(auto-merge|qa-verification)[^/]*$/i,
+  /^docs\/(auto-merge|qa-verification)\.md$/i,
+];
 
 /** A glob as a regular expression: `**` any path, `*` anything within a folder, `?` one character. */
 export function globToRegExp(glob: string): RegExp {
@@ -50,10 +62,10 @@ export function globToRegExp(glob: string): RegExp {
   return new RegExp(`^${re}$`, 'i');
 }
 
-/** Whether `path` is somewhere a person must always look, whatever any policy says. */
-export const isSensitive = (path: string): boolean => PROTECTED.some((re) => re.test(path)) || riskOf([path]).some((r) => NEEDS_HUMAN.has(r));
+/** Whether `path` is the rules or the safeguards: always a person's. */
+export const isGovernance = (path: string): boolean => GOVERNANCE.some((re) => re.test(path));
 
-/** A path the owner may count as low-risk: not a sensitive one, and a glob that is not just "everything". */
+/** A path pattern the owner may add: a real pattern, not just "everything". */
 export function validExtraGlob(glob: string): boolean {
   return /^[A-Za-z0-9_.\-*?/]{1,120}$/.test(glob) && !glob.startsWith('/') && !glob.includes('..') && !/^(\*\*?\/?)+$/.test(glob);
 }
@@ -65,11 +77,33 @@ export interface ChangeFacts {
   lines: number;
   base: string;
   fork: boolean;
+  title?: string;
+  /** What the changed lines of the diff say about billing, payments and spending (financialReasons of the diff), when the diff has been read. */
+  diffMoney?: string[];
 }
 
-/** Whether the change is the kind that may be merged without a person, under `policy`. Every reason it is not is listed. */
-export function classify(change: ChangeFacts, policy: Pick<RepoMergePolicy, 'bases' | 'maxChangedLines' | 'maxFiles' | 'extraLowRisk'>): MergeClassification {
+/** The paths a unified diff names, old and new (so a rename out of a protected path is seen too). */
+export function filesOfDiff(diff: string): string[] {
+  const out = new Set<string>();
+  for (const line of diff.split('\n')) {
+    const m = line.startsWith('diff --git ') ? /^diff --git a\/(.+?) b\/(.+)$/.exec(line) : null;
+    if (m) {
+      out.add(m[1]);
+      out.add(m[2]);
+    }
+  }
+  return [...out];
+}
+
+const some = (list: readonly string[], n = 5) => `${list.slice(0, n).join(', ')}${list.length > n ? ` and ${list.length - n} more` : ''}`;
+
+/**
+ * Whether the change may be merged without a person, under `policy`, and how hard it must be verified. Every reason it is not is
+ * listed. `hard` marks the reasons nothing can lift (financial, governance): the office will not even ask for a review of those.
+ */
+export function classify(change: ChangeFacts, policy: Pick<RepoMergePolicy, 'bases' | 'maxChangedLines' | 'maxFiles' | 'humanPaths'>): MergeClassification {
   const why: string[] = [];
+  let hard = false;
   const files = change.files;
   if (!files || files.length === 0) why.push('its file list is not known');
   else if (files.length >= FILES_SEEN_MAX) why.push('its file list is cut off, so some changes are unseen');
@@ -77,12 +111,25 @@ export function classify(change: ChangeFacts, policy: Pick<RepoMergePolicy, 'bas
   if (!policy.bases.includes(change.base)) why.push(`it targets ${change.base}, which is not one of the branches automatic merging covers`);
   if (change.lines > policy.maxChangedLines) why.push(`it changes ${change.lines} lines (the limit is ${policy.maxChangedLines})`);
   if (files && files.length > policy.maxFiles) why.push(`it changes ${files.length} files (the limit is ${policy.maxFiles})`);
-  if (files?.length) {
-    const extra = policy.extraLowRisk.filter(validExtraGlob).map(globToRegExp);
-    const sensitive = files.filter(isSensitive);
-    if (sensitive.length) why.push(`it touches sensitive or protected files: ${sensitive.slice(0, 5).join(', ')}${sensitive.length > 5 ? ` and ${sensitive.length - 5} more` : ''}`);
-    const unknown = files.filter((f) => !isSensitive(f) && !LOW_RISK.some((re) => re.test(f)) && !extra.some((re) => re.test(f)));
-    if (unknown.length) why.push(`it touches files that are not documentation, tests or a path the owner marked low-risk: ${unknown.slice(0, 5).join(', ')}${unknown.length > 5 ? ` and ${unknown.length - 5} more` : ''}`);
+  const money = [...financialReasons({ files, title: change.title }), ...(change.diffMoney ?? [])];
+  if (money.length) {
+    hard = true;
+    why.push(`billing, payments, subscriptions or spending is always a person's decision: ${money[0]}`, ...money.slice(1));
   }
-  return why.length ? { verdict: 'human', reasons: why } : { verdict: 'eligible', reasons: ['only documentation, tests and paths the owner marked low-risk, within the size limits'] };
+  let strict = false;
+  if (files?.length) {
+    const rules = files.filter(isGovernance);
+    if (rules.length) {
+      hard = true;
+      why.push(`it changes the rules or the safeguards that automatic merging runs under (${some(rules)}): a person decides`);
+    }
+    const owner = policy.humanPaths.filter(validExtraGlob).map(globToRegExp);
+    const listed = files.filter((f) => owner.some((re) => re.test(f)));
+    if (listed.length) why.push(`it touches paths the owner keeps for a person: ${some(listed)}`);
+    strict = files.some(isSensitive);
+  }
+  if (why.length) return { verdict: 'human', tier: strict ? 'strict' : 'standard', hard, reasons: why };
+  return strict
+    ? { verdict: 'eligible', tier: 'strict', hard: false, reasons: [`it touches a sensitive technical area (${some(files!.filter(isSensitive), 3)}): stronger QA, ${STRICT_REVIEWS} independent reviews of the exact commit`] }
+    : { verdict: 'eligible', tier: 'standard', hard: false, reasons: ['not billing, payments or spending, not governance, within the size limits'] };
 }
