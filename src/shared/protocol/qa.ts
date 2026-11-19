@@ -5,7 +5,6 @@
 import type { AgentProvider } from './agents.js';
 import type { Blocked, Candidate } from './dispatch.js';
 import type { GhCheck } from './github.js';
-import type { WorkerStatus } from './workers.js';
 
 /** Where a pull request stands. Merging is never a state: a person does that. */
 export type QaState =
@@ -152,6 +151,3 @@ export type QaServerMsg =
   | { t: 'qa.state'; state: QaViewState }
   | { t: 'qa.reviewers'; offer: ReviewerOffer }
   | { t: 'qa.result'; pr: number; ok: boolean; message: string };
-
-/** Reported to the QA view for a worker that is not eligible for a reason of its own status. */
-export type ReviewerStatus = WorkerStatus;
