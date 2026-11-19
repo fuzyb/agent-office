@@ -1,54 +1,56 @@
-name: Release
+name: Release (manual, needs the owner)
 
-# Every change to the app that lands on main is built, tested and published as a GitHub release,
-# and install.sh installs the newest one. The version is package.json's major.minor plus the
-# number of commits on main (v0.1.68, v0.1.69, ...); bump package.json for a new minor.
+# Publishing a release is never a side effect of merging. It happens only when the owner runs this
+# workflow by hand from main, types the tag they expect, ticks "publish", and approves the run in the
+# "release" environment.
 #
-# Pull requests get the same build, tests and a real install of the packed release through
-# install.sh, but publish nothing.
+#   Run with "publish" unticked (the default): builds, tests and packs the release, installs the pack
+#   on the runner, and stops. Nothing is published. Any branch may be used for this.
+#
+#   Run from main with "publish" ticked: the same, then the publish job waits for the owner's
+#   approval (Settings -> Environments -> release -> Required reviewers, set up once by the owner) and
+#   creates the GitHub release from the file the build job made.
+#
+# The version is package.json's major.minor plus the number of commits on the ref (v0.1.68, v0.1.69...).
+# Only the publish job can write, and it runs no repository code: it publishes a file.
 
 on:
-  push:
-    branches: [main]
-    paths:
-      - 'src/**'
-      - 'bin/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'tsconfig*.json'
-      - 'vite.config.ts'
-      - '.github/workflows/release.yml'
-  pull_request:
-    paths:
-      - 'src/**'
-      - 'bin/**'
-      - 'tests/**'
-      - 'package.json'
-      - 'package-lock.json'
-      - 'tsconfig*.json'
-      - 'vite.config.ts'
-      - 'install.sh'
-      - '.github/workflows/release.yml'
   workflow_dispatch:
+    inputs:
+      expected_tag:
+        description: 'The tag you expect this run to produce, for example v0.1.214. The run stops if it computes a different one.'
+        required: true
+        type: string
+      publish:
+        description: 'Publish the release (main only; waits for approval in the "release" environment). Leave unticked to only build and test.'
+        required: true
+        type: boolean
+        default: false
 
-permissions:
-  contents: read
+permissions: {}
 
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: release
+  cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: ubuntu-latest
+  build:
+    name: Build, test and pack
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
     permissions:
-      contents: write
+      contents: read
+    outputs:
+      version: ${{ steps.pack.outputs.version }}
+      tag: ${{ steps.pack.outputs.tag }}
+      sha: ${{ steps.pack.outputs.sha }}
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          fetch-depth: 0 # the version counts the commits on main
+          fetch-depth: 0 # the version counts the commits
+          persist-credentials: false
 
-      - uses: actions/setup-node@v7
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1
         with:
           node-version: 22
           cache: npm
@@ -62,8 +64,14 @@ jobs:
 
       - name: Pack the release
         id: pack
+        env:
+          EXPECTED_TAG: ${{ inputs.expected_tag }}
         run: |
           version="$(node -p 'require("./package.json").version.split(".").slice(0, 2).join(".")').$(git rev-list --count HEAD)"
+          if [ "v$version" != "$EXPECTED_TAG" ]; then
+            echo "::error::this run makes v$version, not $EXPECTED_TAG: nothing is published"
+            exit 1
+          fi
           npm version "$version" --no-git-tag-version --allow-same-version
           # It's built already, and installs don't have the build tools.
           npm pkg delete scripts.prepare
@@ -73,9 +81,10 @@ jobs:
           npm pack --ignore-scripts
           mv "agent-office-$version.tgz" agent-office.tgz
           tar -tzf agent-office.tgz | grep -qx 'package/npm-shrinkwrap.json'
-          echo "version=$version" >> "$GITHUB_OUTPUT"
+          sha256sum agent-office.tgz | tee agent-office.tgz.sha256
+          { echo "version=$version"; echo "tag=v$version"; echo "sha=$(git rev-parse HEAD)"; } >> "$GITHUB_OUTPUT"
 
-      - name: Install it with install.sh and start it
+      - name: Install it with install.sh and start it (on this runner only)
         env:
           AGENT_OFFICE_TARBALL: ${{ github.workspace }}/agent-office.tgz
           AGENT_OFFICE_INSTALL_DIR: ${{ runner.temp }}/install
@@ -97,14 +106,40 @@ jobs:
           grep -qx "v${{ steps.pack.outputs.version }}" install/current
           kill -INT "$office"
 
-      - name: Publish
-        if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9
+        with:
+          name: release-pack
+          path: |
+            agent-office.tgz
+            agent-office.tgz.sha256
+          retention-days: 14
+
+  publish:
+    name: Publish the release (needs the owner's approval)
+    needs: build
+    # Only from main, only when asked for. A run from any other branch can never get here.
+    if: ${{ inputs.publish && github.ref == 'refs/heads/main' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release # the owner adds themselves as a required reviewer; see the top of this file
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333
+        with:
+          name: release-pack
+
+      - name: Check the file is the one that was tested
+        run: sha256sum -c agent-office.tgz.sha256
+
+      - name: Create the release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: v${{ steps.pack.outputs.version }}
+          TAG: ${{ needs.build.outputs.tag }}
+          SHA: ${{ needs.build.outputs.sha }}
         run: |
-          if gh release view "$TAG" > /dev/null 2>&1; then
-            echo "$TAG is already released"
-            exit 0
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" > /dev/null 2>&1; then
+            echo "::error::$TAG is already released: nothing was changed"
+            exit 1
           fi
-          gh release create "$TAG" agent-office.tgz --target "$GITHUB_SHA" --title "$TAG" --generate-notes --latest
+          gh release create "$TAG" agent-office.tgz --repo "$GITHUB_REPOSITORY" --target "$SHA" --title "$TAG" --generate-notes --latest
