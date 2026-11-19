@@ -186,7 +186,7 @@ const classed = (files: string[] | undefined, over: Partial<{ lines: number; bas
 const verdict = (files: string[] | undefined, over: Parameters<typeof classed>[1] = {}, humanPaths: string[] = []) => classed(files, over, humanPaths).verdict;
 
 test('application code, infrastructure, security, dependencies and CI are eligible (the sensitive ones verified harder); money, the rules themselves and what is not fully known need a person', () => {
-  for (const f of ['src/server/queue.ts', 'src/client/ui/x.ts', 'docs/guide.md', 'README.md', 'tests/a.test.ts', 'docs/img/x.png', 'src/shared/dispatch.ts']) {
+  for (const f of ['src/server/queue.ts', 'src/client/ui/x.ts', 'docs/guide.md', 'README.md', 'tests/a.test.ts', 'docs/img/x.png', 'src/shared/protocol/usage.ts']) {
     const c = classed([f]);
     assert.deepEqual([c.verdict, c.tier, c.hard], ['eligible', 'standard', false], f);
   }
@@ -197,7 +197,7 @@ test('application code, infrastructure, security, dependencies and CI are eligib
   }
   assert.match(classed(['.github/workflows/ci.yml']).reasons[0], /sensitive technical area.*stronger QA, 2 independent reviews/);
   // The rules the office merges under, and the code that decides what merges: a person, whatever any policy says.
-  for (const f of ['AGENTS.md', 'CLAUDE.md', 'roles/qa-engineer.md', '.claude/agents/x.md', 'projects/hq/brief.md', 'templates/x.md', 'playbooks/a.md', '.github/CODEOWNERS', 'src/server/merge/service.ts', 'src/server/merge/store.ts', 'src/shared/merge.ts', 'src/shared/financial.ts', 'src/shared/protocol/merge.ts', 'src/server/ws/handlers/merge.ts', 'src/client/ui/merge.ts', 'src/server/gh-merge.ts', 'src/server/gh-checks.ts', 'src/server/qa/service.ts', 'src/shared/qa.ts', 'tests/auto-merge.test.ts', 'docs/auto-merge.md']) {
+  for (const f of ['AGENTS.md', 'CLAUDE.md', 'roles/qa-engineer.md', '.claude/agents/x.md', 'projects/hq/brief.md', 'templates/x.md', 'playbooks/a.md', '.github/CODEOWNERS', 'src/server/merge/service.ts', 'src/server/merge/store.ts', 'src/shared/merge.ts', 'src/shared/financial.ts', 'src/shared/protocol/merge.ts', 'src/server/ws/handlers/merge.ts', 'src/client/ui/merge.ts', 'src/server/gh-merge.ts', 'src/server/gh-checks.ts', 'src/server/github.ts', 'src/server/floor.ts', 'src/server/office/floors.ts', 'src/server/ws/handlers/qa.ts', 'src/server/ws/handlers/index.ts', 'src/server/hooks/office-workers.ts', 'src/server/dispatch/dispatcher.ts', 'src/shared/dispatch.ts', 'src/server/qa/service.ts', 'src/shared/qa.ts', 'tests/auto-merge.test.ts', 'docs/auto-merge.md']) {
     const c = classed(['src/server/queue.ts', f]);
     assert.deepEqual([c.verdict, c.hard], ['human', true], f);
     assert.match(c.reasons.join(), /rules or the safeguards/, f);
@@ -1309,4 +1309,39 @@ test('an automatic merge that the head, the checks, the branch protection or the
   r.ops.fresh(7);
   await sync(r);
   assert.equal(r.ops.merges.length, 1, 'once everything is as it should be, it merges');
+});
+
+test('a change to the GitHub merge and check integration, the floor wiring, or who may review or merge can never be auto-merged, even verified, reviewed and alone in the pull request', async (t) => {
+  const wiring = ['src/server/github.ts', 'src/server/floor.ts', 'src/server/ws/handlers/qa.ts', 'src/server/ws/handlers/merge.ts', 'src/server/ws/handlers/index.ts', 'src/server/hooks/office-workers.ts', 'src/server/office/floors.ts', 'src/server/gh-merge.ts', 'src/server/gh-checks.ts', 'src/server/dispatch/dispatcher.ts', 'src/shared/dispatch.ts', 'src/server/qa/store.ts', 'src/server/merge/gate.ts'];
+  for (const f of wiring) {
+    const alone = classify({ files: [f], lines: 3, base: 'main', fork: false }, POLICY);
+    assert.deepEqual([alone.verdict, alone.hard], ['human', true], f);
+    assert.match(alone.reasons.join(), /rules or the safeguards/, f);
+    // Ordinary code next to it does not dilute it.
+    assert.equal(classify({ files: ['src/server/queue.ts', 'docs/guide.md', f], lines: 3, base: 'main', fork: false }, POLICY).verdict, 'human', f);
+    // End to end: ready (checks pass, a review stands), the policy is on, and still nothing is merged, assigned or sent.
+    const r = rig(t, { workers: [author(), worker({ name: 'Quinn' })] });
+    on(r);
+    await ready(r, 7, { files: [f] });
+    await r.merge.onQa();
+    assert.equal(r.ops.merges.length, 0, f);
+    assert.equal(r.merge.state().prs[0].status, 'human', f);
+    assert.equal(r.ops.pullCalls, 0, `${f}: GitHub was not even asked to merge`);
+    assert.equal((await r.merge.attempt(7)).merged, false, f);
+    assert.equal((await r.merge.approve(7, SHA1, 'Ada')).ok, false, `${f}: an approval cannot lift it`);
+    assert.ok(r.audit().some((e) => e.kind === 'escalated'), `${f}: written down for a person`);
+  }
+  // No automatic review is given for it, and a failure is not sent back for another go: it was never the office's to merge.
+  const m = rig(t, { workers: [author(), worker({ name: 'Quinn' })] });
+  on(m);
+  await unreviewed(m, { files: ['src/server/github.ts'] });
+  m.gh.extra.get(7)!.checks = [{ name: 'test', state: 'fail' }];
+  await sync(m);
+  assert.deepEqual([m.prompts.length, m.qa.store.assignments.length, m.qa.store.routes.length], [0, 0, 0]);
+  // The billing exception and the ordinary path are unchanged beside it: other server code merges, billing still does not.
+  const ok = rig(t);
+  on(ok);
+  await ready(ok, 7, { files: ['src/server/queue.ts', 'src/server/workers.ts'] });
+  await ok.merge.onQa();
+  assert.equal(ok.ops.merges.length, 1);
 });

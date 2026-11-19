@@ -60,8 +60,8 @@ within the size limits (2000 lines / 60 files by default; the owner can set them
   check counts as much as adding one, and so does renaming a file out of a billing folder. It is deliberately broad: a false alarm costs one
   person's merge, a miss spends money. When the diff cannot be read, or is too large for GitHub to return, a person decides.
 - **The rules and the safeguards themselves:** `AGENTS.md`, `CLAUDE.md`, `roles/`, `playbooks/`, `templates/`, `projects/`, `private/`, `.claude/`,
-  `CODEOWNERS`, and the code, tests and docs of this mechanism, its financial classifier, the merge and check code that talks to GitHub, and the QA
-  code that judges reviews. The office does not merge unattended a change to the thing that decides what it merges. This is a deliberate exception
+  `CODEOWNERS`, and the code, tests and docs of this mechanism, its financial classifier, the GitHub integration (merge and checks), the floor that wires QA, merging and the policy together, who may review or merge over the socket and the
+  worker route, dispatch (who may take a review), and the QA code that judges reviews. The office does not merge unattended a change to the thing that decides what it merges. This is a deliberate exception
   the owner can lift in the code, not in a setting.
 - A change that is **not fully known** (file list missing or cut off), from a **fork**, aimed at a branch the policy does not name, over the size
   limits, or touching a path the owner listed as **always for a person** (the policy's "paths that always need a person").

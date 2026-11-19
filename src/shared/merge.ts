@@ -38,7 +38,14 @@ const GOVERNANCE: RegExp[] = [
   /^(roles|playbooks|templates|projects|private)\//i,
   // the merge machinery, its financial classifier and gate, the QA code that judges reviews, and their tests and docs
   /^src\/(shared|server|client)\/(ui\/)?(protocol\/)?(merge|financial)(\/|\.ts$)/i,
-  /^src\/server\/(ws\/handlers\/merge|gh-merge|gh-checks)\.ts$/i,
+  // the GitHub integration (what is merged, what counts as passing), the floor that wires QA, merging and the policy together, who may do what
+  // over the socket (QA and merge messages, the registry of handlers) and over the worker route (a reviewer's verdict), and dispatch (who may take a review)
+  /^src\/server\/(github|gh-merge|gh-checks|floor)\.ts$/i,
+  /^src\/server\/office\/floors\.ts$/i,
+  /^src\/server\/ws\/handlers\/(merge|qa|index|common)\.ts$/i,
+  /^src\/server\/hooks\/office-workers\.ts$/i,
+  /^src\/server\/dispatch\//i,
+  /^src\/shared\/(dispatch|protocol\/dispatch)\.ts$/i,
   /^src\/server\/(qa|merge)\//i,
   /^src\/shared\/(qa|protocol\/qa)\.ts$/i,
   /^tests\/(auto-merge|qa-verification)[^/]*$/i,
