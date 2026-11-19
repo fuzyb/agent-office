@@ -46,6 +46,8 @@ const policyInput = { mode: 'auto' as const, authorization: 'HQ governance PR #1
 // --- A floor with real QA and a mocked GitHub ---------------------------------------------------------------------------------------------
 
 class FakeGh implements QaGitHub {
+  /** The repository the floor is for: its pull requests have URLs in it. */
+  repo = 'o/r';
   pulls = { items: [] as GhPull[] };
   extra = new Map<number, PullExtra>();
   /** What branch protection says is required (null: it says nothing readable). */
@@ -78,7 +80,7 @@ class FakeGh implements QaGitHub {
   open(n: number, o: { sha?: string; files?: string[]; lines?: number; fork?: boolean; base?: string; title?: string } = {}) {
     const sha = o.sha ?? SHA1;
     const lines = o.lines ?? 4;
-    const p = { number: n, title: o.title ?? `PR ${n}`, state: 'OPEN', isDraft: false, url: `https://github.com/o/r/pull/${n}`, author: 'the-shared-bot', labels: [{ name: 'approved', color: '0f0' }], reviewDecision: 'APPROVED', headRefName: `feature-${n}`, headRefOid: sha, baseRefName: o.base ?? 'main', createdAt: '', updatedAt: '', additions: lines - 1, deletions: 1, checks: 'pass', body: 'Reviewed-by: an independent QA Engineer', closes: [] } as GhPull;
+    const p = { number: n, title: o.title ?? `PR ${n}`, state: 'OPEN', isDraft: false, url: `https://github.com/${this.repo}/pull/${n}`, author: 'the-shared-bot', labels: [{ name: 'approved', color: '0f0' }], reviewDecision: 'APPROVED', headRefName: `feature-${n}`, headRefOid: sha, baseRefName: o.base ?? 'main', createdAt: '', updatedAt: '', additions: lines - 1, deletions: 1, checks: 'pass', body: 'Reviewed-by: an independent QA Engineer', closes: [] } as GhPull;
     this.pulls.items = [...this.pulls.items.filter((x) => x.number !== n), p];
     this.extra.set(n, { sha, mergeable: 'MERGEABLE', mergeState: 'CLEAN', files: o.files ?? ['docs/guide.md'], fork: o.fork ?? false, checks: [pass('test')] });
   }
@@ -151,6 +153,7 @@ function rig(t: { after(fn: () => void): void }, o: { repo?: string; policy?: Me
   const queue = new TaskQueue(dir, qworkers, false, events);
   t.after(() => queue.shutdown());
   const r = { gh: new FakeGh(), ops: new FakeOps(), gate: { open: o.gateOpen ?? true }, dir, officeDir, emitted: [], toasts: [], workers, prompts: [] } as unknown as Rig;
+  r.gh.repo = o.repo || 'o/r';
   Object.defineProperty(r, 'spawned', { get: () => spawned });
   const floor = { id: 'f1', dir, def: { name: 'Floor' }, workers: { list: () => workers, get: (id: string) => workers.find((w) => w.id === id), ownerOf: () => undefined, prompt: (id: string, text: string) => (r.prompts.push({ id, text }), undefined) }, queue, github: r.gh } as unknown as QaFloor;
   r.qa = new QaService(dir, floor, () => ({ floors: () => [floor], planLimits: () => ({ windows: o.limits ?? [], at: 0 }) }), r.gh, { emit() {}, toast() {} });
@@ -616,10 +619,10 @@ test("GitHub's branch protection, mergeability and permissions are respected and
   assert.equal(r.ops.merges.length, 1, 'one request, no retry with other flags');
   // What is sent to GitHub: exactly the merge of one commit, never a bypass.
   const calls: string[][] = [];
-  const gh = new GitHub(tmp('gh'), () => {}, () => {}, async (args) => (calls.push(args), '{}'));
+  const gh = new GitHub(tmp('gh'), () => {}, () => {}, 'o/r', async (args) => (calls.push(args), '{}'));
   await gh.ops.merge(7, SHA1, 'squash');
   await gh.ops.merge(8, SHA2, 'rebase');
-  assert.deepEqual(calls, [['pr', 'merge', '7', '--squash', '--match-head-commit', SHA1], ['pr', 'merge', '8', '--rebase', '--match-head-commit', SHA2]]);
+  assert.deepEqual(calls, [['pr', 'merge', '--repo', 'o/r', '7', '--squash', '--match-head-commit', SHA1], ['pr', 'merge', '--repo', 'o/r', '8', '--rebase', '--match-head-commit', SHA2]]);
   assert.ok(!calls.flat().some((a) => /^--(admin|auto|delete-branch|force)/.test(a)));
 });
 
@@ -1344,4 +1347,31 @@ test('a change to the GitHub merge and check integration, the floor wiring, or w
   await ready(ok, 7, { files: ['src/server/queue.ts', 'src/server/workers.ts'] });
   await ok.merge.onQa();
   assert.equal(ok.ops.merges.length, 1);
+});
+
+test("an upstream pull request that reaches the list anyway (a fork's floor) is never scanned, assigned, approved or merged", async (t) => {
+  const r = rig(t, { workers: [worker({ name: 'Quinn' })] });
+  on(r);
+  await ready(r, 7, { files: ['docs/guide.md'] });
+  // Upstream's #409, with passing checks and a person's review recorded for it: everything a merge would need, in the wrong repository.
+  r.gh.open(409, { files: ['docs/guide.md'], sha: SHA2 });
+  r.gh.pulls.items.find((p) => p.number === 409)!.url = 'https://github.com/AgentSystemLabs/agent-office/pull/409';
+  r.ops.fresh(409, { head: SHA2, repo: 'AgentSystemLabs/agent-office' });
+  r.gh.live.set(409, SHA2);
+  const asked: string[] = [];
+  const read = r.ops.diff.bind(r.ops);
+  r.ops.diff = async (base: string, sha: string) => (asked.push(sha), read(base, sha));
+  await sync(r);
+  assert.equal(r.qa.attest(409, SHA2, 'approve', 'QA-9', 'x', 'Ada').ok, true, 'the QA view of a mixed list may hold it');
+  await sync(r);
+  assert.deepEqual(r.ops.merges.map((m) => m[0]), [7], 'only the floor’s own pull request is merged');
+  assert.deepEqual(r.merge.state().prs.map((p) => p.number), [7], 'it is not even listed');
+  assert.ok(!asked.includes(SHA2), 'its diff was never read');
+  const gone = await r.merge.attempt(409);
+  assert.equal(gone.merged, false);
+  assert.match(gone.message, /No open pull request #409 of o\/r/);
+  assert.equal((await r.merge.approve(409, SHA2, 'Ada')).ok, false);
+  assert.match(String(r.merge.allows(409, SHA2)), /not a pull request of o\/r/);
+  assert.ok(!r.audit().some((e) => e.pr === 409), 'nothing about it is recorded as a decision, an assignment or a merge');
+  assert.equal(r.prompts.filter((p) => /#409|pull\/409/.test(p.text)).length, 0, 'no worker was sent it');
 });
