@@ -24,6 +24,7 @@ import { STATUS_LABEL, clip, closeAllModals, h, toast } from '../../ui/dom';
 import { openDeskLabel } from '../../ui/floorplan';
 import type { MeetingPreset } from '../../ui/meeting';
 import { routeDispatchMessage } from '../../ui/dispatch';
+import { routeQaMessage } from '../../ui/qa';
 import { confirmDialog, lostWorktreeDialog, openPrompt, routeWorktreeMessage, sendHomeDialog } from '../../ui/prompt';
 import { providerLabel, resolvedProvider } from '../../ui/provider';
 import { openPull } from '../../ui/pull';
@@ -152,6 +153,9 @@ export function installWorkerActions(ctx: Ctx, core: CoreState, parts: WorkerAct
   ctx.messages.on('dispatch.inventory', routeDispatchMessage);
   ctx.messages.on('dispatch.preview', routeDispatchMessage);
   ctx.messages.on('dispatch.result', routeDispatchMessage);
+  ctx.messages.on('qa.state', routeQaMessage);
+  ctx.messages.on('qa.reviewers', routeQaMessage);
+  ctx.messages.on('qa.result', routeQaMessage);
   function killWorker(id: string) {
     const w = store.workers.get(id);
     if (!w) return;

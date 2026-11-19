@@ -70,6 +70,7 @@ export function floorHelpers(ctx: Ctx): FloorHelpers {
 export async function openFloors(ctx: Ctx, hookPort: number): Promise<FloorsOpen> {
   const { cfg, floors, clients } = ctx;
   const floorContext: FloorContext = {
+    planLimits: () => ctx.limits.state,
     agentCmd: cfg.agentCmd,
     agentArgs: cfg.agentArgs,
     dshProfile: cfg.dshProfile,

@@ -18,6 +18,10 @@ const USAGE = `Usage:
                                                 whether it could take a task now (looks only)
   office-workers preview <task id> [--json]     who could take a waiting queue task, best first, and why the
                                                 others cannot (looks only: a person dispatches it, in the browser)
+  office-workers review-submit --pr <n> --sha <commit> --verdict approve|changes|comment <<'EOF'
+  …what you checked and found…                  report your verdict on a pull request review a person gave you.
+  EOF                                           It counts only for that commit, and only through this command
+                                                (a GitHub comment is not evidence)
   office-workers hire [options] <<'EOF'         hire a worker at a free desk; its task on stdin
   …the task…                                    (or --prompt "…"). Options: --provider <name>
   EOF                                           --model <m> --effort <e> --desk <id> --issue <n>
@@ -52,9 +56,9 @@ export const ROLES = [
 /** How long the office may take to come back when it's restarting (a dev reload, an upgrade). */
 const RETRY_MS = 6000;
 /** Sending several workers home waits on git for each; hiring may fetch from GitHub first. */
-const TIMEOUT_MS = { inventory: 15_000, preview: 15_000, list: 15_000, tell: 15_000, pr: 45_000, hire: 90_000, home: 300_000 };
+const TIMEOUT_MS = { review: 15_000, inventory: 15_000, preview: 15_000, list: 15_000, tell: 15_000, pr: 45_000, hire: 90_000, home: 300_000 };
 /** Where each call goes, under /office/workers. */
-const PATHS = { inventory: '/inventory', preview: '/preview', list: '', hire: '', home: '/home', tell: '/tell', pr: '/pr' };
+const PATHS = { review: '/review', inventory: '/inventory', preview: '/preview', list: '', hire: '', home: '/home', tell: '/tell', pr: '/pr' };
 
 /**
  * Reads `--flag value` and `--flag=value` options, and the words that aren't options.
@@ -98,6 +102,17 @@ export function parseArgs(argv) {
   if (cmd === 'mcp') {
     if (rest.length) throw new UsageError(`mcp takes no arguments (got ${rest.join(' ')})`);
     return { cmd: 'mcp' };
+  }
+  if (cmd === 'review-submit') {
+    const { opts, words } = options(rest, ['--pr', '--sha', '--verdict', '--prompt'], []);
+    if (words.length) throw new UsageError(`Unexpected argument: ${words[0]} (give the summary on stdin or with --prompt "…")`);
+    const pr = Number(String(opts['--pr'] ?? '').replace('#', ''));
+    if (!Number.isSafeInteger(pr) || pr < 1) throw new UsageError('--pr is the pull request number');
+    const sha = String(opts['--sha'] ?? '').trim();
+    if (!/^[0-9a-f]{7,64}$/i.test(sha)) throw new UsageError('--sha is the commit you reviewed (7 to 64 hex characters)');
+    const verdict = String(opts['--verdict'] ?? '');
+    if (!['approve', 'changes', 'comment'].includes(verdict)) throw new UsageError('--verdict is approve, changes or comment');
+    return { cmd: 'review-submit', pr, sha, verdict, ...(opts['--prompt'] !== undefined ? { prompt: String(opts['--prompt']) } : {}) };
   }
   if (cmd === 'inventory') {
     const { opts, words } = options(rest, [], ['--json']);
@@ -180,7 +195,7 @@ export function officeEnv(env) {
 
 /**
  * The HTTP request for one of the office's worker calls.
- * @param {'list' | 'inventory' | 'preview' | 'hire' | 'home' | 'tell' | 'pr'} what
+ * @param {'list' | 'inventory' | 'preview' | 'review' | 'hire' | 'home' | 'tell' | 'pr'} what
  * @param {{ url: string, worker: string, token: string }} office
  * @param {Record<string, unknown>} [body]
  * @returns {{ method: string, url: string, headers: Record<string, string>, body?: string, timeout: number }}
@@ -230,7 +245,7 @@ async function send(req, fetchImpl) {
 
 /**
  * Makes one call to the office; resolves to what it answered, or throws with why it said no.
- * @param {'list' | 'inventory' | 'preview' | 'hire' | 'home' | 'tell' | 'pr'} what
+ * @param {'list' | 'inventory' | 'preview' | 'review' | 'hire' | 'home' | 'tell' | 'pr'} what
  * @param {Record<string, unknown> | undefined} body
  * @param {{ env: Record<string, string | undefined>, fetch: typeof fetch }} io
  */
@@ -348,6 +363,15 @@ export const TOOLS = [
     annotations: { readOnlyHint: true, openWorldHint: false },
   },
   {
+    name: 'submit_pr_review',
+    title: 'Report a pull request review',
+    description:
+      'Reports your verdict on a pull request review that a person gave you (its prompt names the pull request and the exact commit). It is recorded for that commit only, and counts as an independent review only if you did not write the code. ' +
+      'A comment on GitHub is not evidence and is not read: this is the way to report it. You can only answer a review you were given, once.',
+    inputSchema: { type: 'object', properties: { pr: { type: 'integer', minimum: 1 }, sha: { type: 'string', description: 'The commit you reviewed.' }, verdict: { type: 'string', enum: ['approve', 'changes', 'comment'] }, summary: { type: 'string', maxLength: 4000, description: 'What you checked and found, briefly.' } }, required: ['pr', 'sha', 'verdict'], additionalProperties: false },
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  {
     name: 'hire_worker',
     title: 'Hire a worker',
     description:
@@ -443,6 +467,7 @@ const INSTRUCTIONS =
 async function runTool(name, args, io) {
   const a = args && typeof args === 'object' ? args : {};
   if (name === 'list_workers') return { text: JSON.stringify(await call('list', undefined, io), null, 1) };
+  if (name === 'submit_pr_review') return { text: (await call('review', { pr: a.pr, sha: a.sha, verdict: a.verdict, summary: a.summary }, io)).message };
   if (name === 'workforce_inventory') return { text: JSON.stringify(await call('inventory', undefined, io), null, 1) };
   if (name === 'dispatch_preview') return { text: JSON.stringify(await call('preview', { task: typeof a.task === 'string' ? a.task : '' }, io), null, 1) };
   if (name === 'hire_worker') {
@@ -568,6 +593,12 @@ export async function main(argv, io = {}) {
       if (stdin.isTTY) throw new UsageError(`Give the prompt on stdin (office-workers ${cmd.cmd} … <<'EOF' … EOF) or with --prompt "…"`);
       return readStdin(stdin);
     };
+    if (cmd.cmd === 'review-submit') {
+      const summary = (await prompt()).trim();
+      const answer = await call('review', { pr: cmd.pr, sha: cmd.sha, verdict: cmd.verdict, summary }, ctx);
+      out(answer.message);
+      return 0;
+    }
     if (cmd.cmd === 'inventory') {
       const inv = await call('inventory', undefined, ctx);
       out(cmd.json ? JSON.stringify(inv, null, 2) : formatInventory(inv));

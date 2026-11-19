@@ -55,7 +55,7 @@ const seatOf = (w: WorkerInfo): SeatKind => {
   return 'worker';
 };
 
-function factsOf(floor: DispatchFloor, w: WorkerInfo, tasks: QueueTask[]): WorkerFacts {
+export function factsOf(floor: DispatchFloor, w: WorkerInfo, tasks: QueueTask[]): WorkerFacts {
   const pr = workerPr(w, floor.github.pulls.items, tasks);
   const mine = tasks.filter((t) => t.workerId === w.id);
   return {
@@ -115,7 +115,7 @@ function taskFacts(floor: DispatchFloor, task: QueueTask, needs?: TaskNeeds): Ta
   return { id: task.id, title: task.title, floorId: floor.id, owner: task.owner, provider: task.provider, needs: needs ?? task.needs };
 }
 
-function conditions(office: DispatchOffice, floor: DispatchFloor): Conditions {
+export function conditions(office: DispatchOffice, floor: DispatchFloor): Conditions {
   const state = floor.queue.state();
   const full = floor.queue.running >= state.maxWorkers;
   return {

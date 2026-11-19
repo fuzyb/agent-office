@@ -1,4 +1,7 @@
 {
+ "qa/service.ts": [
+  "if (!w.role || !REVIEWERS.has(w.role)) return blocked.push({ workerId: w.id, name: w.name, floorName: w.floorName, reasons: ['it is not a QA Engineer or a Reviewer'] }), false;"
+ ],
  "dispatch/dispatcher.ts": [
   "role: w.role,"
  ],
