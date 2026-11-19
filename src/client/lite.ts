@@ -16,6 +16,7 @@ import { $, clip, closeAllModals, doingNow, h, onDoingChange, onModalChange, ope
 import { openTerminal, openTerminalFor, routeTerminalMessage } from './ui/terminal';
 import { openChanges, openChangesFor, routeChangesMessage } from './ui/changes';
 import { lostWorktreeDialog, openPrompt, routeWorktreeMessage, sendHomeDialog } from './ui/prompt';
+import { shownRole } from '../shared/worker-identity';
 import { openBoard } from './ui/boards';
 import type { BoardActions } from './ui/github/prompts';
 import { openPull, routePullMessage } from './ui/pull';
@@ -171,6 +172,7 @@ function workerCard(w: WorkerInfo): HTMLElement {
         'span.lite-info',
         {},
         h('span.lite-name', {}, w.name),
+        shownRole(w) ? h('span.lite-sub', {}, shownRole(w)) : null,
         task ? h('span.lite-task', {}, task) : null,
         now ? h('span.lite-now', {}, now) : null,
         h('span.lite-sub', {}, sub.join(' · ')),

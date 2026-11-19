@@ -27,7 +27,9 @@ import { CARRY_ON_PROMPT, WorkerTasks } from './tasks.js';
 import { flushScreens, fullScreens, newTerm, offlineBanner, screenText, type HeadlessTerminal } from './terminal.js';
 import type { HookEnv, OpenedPr, RepoSource, RunAs, Worker, WorkerContext, WorkerEvents, WorkerHandle } from './types.js';
 import { clamp, safeEq, truncate } from './util.js';
-import { COLORS, NAMES, newWorker } from './worker.js';
+import { SHELL_MARK, workerSlug } from '../../shared/worker-identity.js';
+import { WorkerIdentity } from './identity.js';
+import { COLORS, NAMES, newWorker, syncViewers } from './worker.js';
 import { WorkerTrees, lostMessage } from './worktree.js';
 
 const SCREEN_INTERVAL_MS = 250;
@@ -62,6 +64,8 @@ export class WorkerManager {
   private tasks: WorkerTasks;
   private worktrees: WorkerTrees;
   private prs: WorkerPrs;
+  /** What its workers are called and what they're for (see WorkerIdentity.update). */
+  readonly identity: WorkerIdentity;
   private usageTimer: NodeJS.Timeout;
   /** Runs the workers' terminals outside the office, so they outlive a restart of it (see ptys.ts). */
   private host: PtyHost;
@@ -121,6 +125,7 @@ export class WorkerManager {
     this.tasks = new WorkerTasks(this.ctx, claude, childEnv());
     this.worktrees = new WorkerTrees(this.ctx);
     this.prs = new WorkerPrs(this.ctx);
+    this.identity = new WorkerIdentity(this.ctx);
     this.host = new PtyHost(dataDir, () => this.events.toast("The workers' terminal host stopped — resuming them", 'warn'));
     this.scrollback = new ScrollbackStore(dataDir);
     this.drops = new DropStore(dataDir);
@@ -219,7 +224,7 @@ export class WorkerManager {
    * (see meetings.ts), in the meeting's own worktree, which everyone at the table shares. `repos` are
    * other floors' repositories a worker in its own worktree works in too (see makeWorkspace).
    */
-  spawn(deskId: string, by: string, prompt?: string, worktree = false, kind: WorkerKind = 'agent', provider?: AgentProvider, model?: string, effort?: AgentEffort, meeting?: { id: string; worktree?: WorkerInfo['worktree'] }, owner?: string, repos: RepoSource[] = [], via?: 'herald'): WorkerInfo | string {
+  spawn(deskId: string, by: string, prompt?: string, worktree = false, kind: WorkerKind = 'agent', provider?: AgentProvider, model?: string, effort?: AgentEffort, meeting?: { id: string; worktree?: WorkerInfo['worktree'] }, owner?: string, repos: RepoSource[] = [], via?: 'herald', asked?: { name?: unknown; role?: unknown }): WorkerInfo | string {
     // Nobody picked (a board agent, say): the office's default worker, model and effort included.
     if (kind === 'agent' && provider === undefined) ({ provider, model, effort } = this.officeDefault);
     const selectedProvider = kind === 'agent' ? provider : undefined;
@@ -247,14 +252,16 @@ export class WorkerManager {
     if (owner && signIn && this.runAs && !this.runAs.claudeReady(owner)) return this.runAs.why(signIn);
     const full = this.capacity?.full();
     if (full) return full;
-    const used = new Set([...this.workers.values()].map((w) => w.info.name.replace(/ 🐚$/, '')));
     const agent = seat.station && STATION_AGENT[seat.station];
-    const name = agent ? agent.name : (NAMES.find((n) => !used.has(n)) ?? `Worker ${this.workers.size + 1}`);
+    // The name and role somebody picked are checked before anything is made for the worker (its worktree, say).
+    const picked = this.identity.pick(asked, kind, !!agent, NAMES, agent?.name);
+    if (typeof picked === 'string') return picked;
+    const { name, role } = picked;
     const id = randomBytes(6).toString('hex');
     let wt: WorkerInfo['worktree'] = meeting?.worktree;
     let others: WorkerRepo[] | undefined;
     if (worktree) {
-      const slug = `${name.toLowerCase()}-${id.slice(0, 4)}`;
+      const slug = `${workerSlug(name)}-${id.slice(0, 4)}`; // plain letters and digits, whatever it's called
       const made = repos.length ? this.makeWorkspace(slug, repos) : this.trees.create(slug);
       if (typeof made === 'string') return made;
       if ('repos' in made) {
@@ -273,7 +280,8 @@ export class WorkerManager {
       model: takesModel(selectedProvider) ? model : undefined,
       effort: takesEffort(selectedProvider) ? effort : undefined,
       deskId,
-      name: kind === 'shell' ? `${name} 🐚` : name,
+      name: kind === 'shell' ? `${name} ${SHELL_MARK}` : name,
+      ...(role ? { role } : {}),
       color: kind === 'shell' ? '#8d99ae' : agent ? agent.color : COLORS[Math.floor(Math.random() * COLORS.length)],
       status: 'starting',
       acked: true,
@@ -419,7 +427,7 @@ export class WorkerManager {
     const w = this.workers.get(id);
     if (!w) return undefined;
     w.viewers.set(clientId, name);
-    let changed = this.syncViewers(w);
+    let changed = syncViewers(w);
     if (!w.info.acked && w.info.status !== 'needs_input') {
       w.info.acked = true;
       changed = true;
@@ -445,12 +453,12 @@ export class WorkerManager {
   detach(id: string, clientId: string) {
     const w = this.workers.get(id);
     if (!w) return;
-    if (w.viewers.delete(clientId) && this.syncViewers(w)) this.emitUpdate(w);
+    if (w.viewers.delete(clientId) && syncViewers(w)) this.emitUpdate(w);
   }
 
   detachAll(clientId: string) {
     for (const w of this.workers.values()) {
-      if (w.viewers.delete(clientId) && this.syncViewers(w)) this.emitUpdate(w);
+      if (w.viewers.delete(clientId) && syncViewers(w)) this.emitUpdate(w);
     }
   }
 
@@ -921,16 +929,6 @@ export class WorkerManager {
     if (w.pty?.id || w.dsh) this.persist();
     // At rest: it may have made a branch of its own this turn, and opened its PR from there.
     if (status === 'done' || status === 'idle') void this.worktrees.syncBranch(w);
-  }
-
-  private syncViewers(w: Worker): boolean {
-    const names = [...new Set(w.viewers.values())];
-    const ids = [...w.viewers.keys()];
-    const same = (a: string[], b: string[]) => a.length === b.length && a.every((n, i) => n === b[i]);
-    if (same(names, w.info.viewers) && same(ids, w.info.viewerIds)) return false;
-    w.info.viewers = names;
-    w.info.viewerIds = ids;
-    return true;
   }
 
   private emitUpdate(w: Worker) {

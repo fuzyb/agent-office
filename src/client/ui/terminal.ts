@@ -9,6 +9,9 @@ import { h, openModal, STATUS_LABEL, timeAgo, toast, type Modal } from './dom';
 import { usageLabel, usageTitle } from './usage';
 import type { ServerMsg, WorkerInfo } from '../../shared/protocol';
 import { isAsleep } from '../../shared/status';
+import { DESK_BY_ID } from '../../shared/layout';
+import { shownRole } from '../../shared/worker-identity';
+import { openIdentityDialog } from './identity';
 import { findLine } from '../../shared/search';
 import { DROP_MAX_BYTES, droppedPaths } from '../../shared/drops';
 import { engineLabel, providerUsageNote, providerUsageState, providerWaitingLabel, resolvedProvider } from './provider';
@@ -126,6 +129,8 @@ export function openTerminal(net: Net, workerId: string, onChanges?: () => void,
     'aria-label': 'Send Esc to the terminal',
   }, '⎋ Esc');
   const changesBtn = h('button.btn', { type: 'button', title: 'What this worker changed: files, diff, commit, open a PR (C at the desk)' }, '🌿 Changes');
+  // Not for a board agent, whose name is fixed.
+  const renameBtn = DESK_BY_ID.get(info.deskId)?.station ? null : h('button.btn', { type: 'button', title: 'Rename this worker or change its role. Its session, worktree and task carry on', 'aria-label': 'Rename worker' }, '✏️');
   const hideBtn = h('button.btn.term-hide', { type: 'button', title: 'Hide this terminal; the worker keeps running at its desk', 'aria-label': 'Hide terminal' }, 'Hide');
   const closeBtn = h('button.btn.close', { title: 'Hide terminal (Esc or Ctrl+]) · the worker keeps running; ⎋ Esc or Ctrl+[ sends Esc to the terminal', 'aria-label': 'Hide terminal' }, '✕');
   const host = h('div.term-host', { 'data-drop': '📎 Drop screenshots or files here to put them in the terminal' });
@@ -149,7 +154,7 @@ export function openTerminal(net: Net, workerId: string, onChanges?: () => void,
   );
   host.append(mic.live);
   // The keypad has an Esc of its own, and a 🎤 on its prompt box.
-  const el = h('div.modal.term', { role: 'dialog', 'aria-label': `${info.name} terminal` }, h('header', {}, dot, title, pill, cost, viewers, typed, modelsBtn, keypad ? null : mic.button, keypad ? null : escBtn, onChanges ? changesBtn : null, hideBtn, closeBtn), tabs.bar, host, tabs.pages, keypad);
+  const el = h('div.modal.term', { role: 'dialog', 'aria-label': `${info.name} terminal` }, h('header', {}, dot, title, pill, cost, viewers, typed, modelsBtn, keypad ? null : mic.button, keypad ? null : escBtn, onChanges ? changesBtn : null, renameBtn, hideBtn, closeBtn), tabs.bar, host, tabs.pages, keypad);
 
   const term = new Terminal({
     fontFamily: 'ui-monospace, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace',
@@ -253,7 +258,7 @@ export function openTerminal(net: Net, workerId: string, onChanges?: () => void,
       modal.close();
       return;
     }
-    title.textContent = [w.kind === 'agent' ? engineLabel(w, store.project) : null, w.name, w.title, w.worktree && `🌿 ${w.worktree.branch}`, w.repos?.length && `🗂️ ${[w.worktree?.path.split(/[\\/]/).pop(), ...w.repos.map((r) => r.name)].join(' + ')}`].filter(Boolean).join(' · ');
+    title.textContent = [w.kind === 'agent' ? engineLabel(w, store.project) : null, w.name, shownRole(w), w.title, w.worktree && `🌿 ${w.worktree.branch}`, w.repos?.length && `🗂️ ${[w.worktree?.path.split(/[\\/]/).pop(), ...w.repos.map((r) => r.name)].join(' + ')}`].filter(Boolean).join(' · ');
     pill.className = `pill ${w.status}`;
     pill.textContent = STATUS_LABEL[w.status] ?? w.status;
     const workerProvider = w.kind === 'agent' ? resolvedProvider(w.provider, store.project) : undefined;
@@ -365,6 +370,8 @@ export function openTerminal(net: Net, workerId: string, onChanges?: () => void,
     onChanges?.();
     modal.close();
   });
+  // Its dialog opens over this one, which stays: the terminal's title follows the new name by itself.
+  renameBtn?.addEventListener('click', () => openIdentityDialog(net, workerId));
 
   term.open(host);
   const sendEsc = () => {

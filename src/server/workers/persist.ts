@@ -3,6 +3,7 @@ import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import type { AgentProvider, WorkerInfo, WorkerStatus, WorkerTask } from '../../shared/protocol.js';
 import { DESK_BY_ID } from '../../shared/layout.js';
 import { isAgentProvider, savedEffort, savedModel } from '../../shared/providers.js';
+import { DEFAULT_ROLE, savedRole } from '../../shared/worker-identity.js';
 import { providerAdapter } from '../providers/index.js';
 import { reportedUsage } from '../reported-usage.js';
 import { restoreTracker, trackerUsage } from '../usage.js';
@@ -26,6 +27,7 @@ export function saveWorkers(file: string, workers: Iterable<Worker>, stopping: b
     effort: info.effort,
     deskId: info.deskId,
     name: info.name,
+    role: info.role,
     color: info.color,
     createdBy: info.createdBy,
     createdAt: info.createdAt,
@@ -79,7 +81,9 @@ export function restoreWorkers(file: string, workers: Map<string, Worker>, defau
         model: savedModel(provider, s.model),
         effort: savedEffort(provider, s.effort),
         deskId: s.deskId,
-        name: s.name ?? 'Worker',
+        // A file from before roles has none: an agent at a desk gets the default. A shell and a board agent have no role.
+        name: typeof s.name === 'string' && s.name.trim() ? s.name : 'Worker',
+        role: s.kind === 'shell' || DESK_BY_ID.get(s.deskId)?.station ? undefined : (savedRole(s.role) ?? DEFAULT_ROLE),
         color: s.color ?? COLORS[0],
         status: 'offline',
         acked: true,

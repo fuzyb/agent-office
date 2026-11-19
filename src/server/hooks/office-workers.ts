@@ -154,7 +154,8 @@ export async function officeWorkers(ctx: Ctx, req: http.IncomingMessage, res: ht
   if (!ctx.floors.has(floor.id)) return send(res, 410, { error: 'This floor closed' });
   // It runs as whoever the asking worker runs as.
   const owner = floor.workers.ownerOf(me.id);
-  const r = floor.workers.spawn(desk, who, ask.prompt, worktree, 'agent', provider, ask.model, ask.effort, undefined, owner);
+  // A role is a label: the new worker gets no more than any other, whatever role the asker or it has.
+  const r = floor.workers.spawn(desk, who, ask.prompt, worktree, 'agent', provider, ask.model, ask.effort, undefined, owner, [], undefined, { name: ask.name, role: ask.role });
   if (typeof r === 'string') return send(res, 400, { error: r });
   ctx.toastFloor(floor, `${who} hired ${r.name}${ask.issue ? ` for issue #${ask.issue}` : ' with a task'}`);
   if (ask.issue) {

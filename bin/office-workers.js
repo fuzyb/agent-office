@@ -17,7 +17,8 @@ const USAGE = `Usage:
   office-workers hire [options] <<'EOF'         hire a worker at a free desk; its task on stdin
   …the task…                                    (or --prompt "…"). Options: --provider <name>
   EOF                                           --model <m> --effort <e> --desk <id> --issue <n>
-                                                --no-worktree
+                                                --no-worktree --name "<what to call it>"
+                                                --role <role id> (see ROLES; a label, not a permission)
   office-workers home <name|id>... [--cleanup auto|keep|worktree|all]
                                                 send workers home. auto (the default) deletes each
                                                 one's worktree and branch unless they hold work
@@ -39,6 +40,11 @@ export class UsageError extends Error {}
 const ENV = ['AGENT_OFFICE_HOOK_URL', 'AGENT_OFFICE_WORKER_ID', 'AGENT_OFFICE_HOOK_TOKEN'];
 export const CLEANUPS = ['auto', 'keep', 'worktree', 'all'];
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'];
+/** The roles a worker can be hired for: the ids of WORKER_ROLES in src/shared/worker-identity.ts (a test keeps them the same). */
+export const ROLES = [
+  'general-worker', 'engineering-chief', 'chief-of-staff', 'product-architect', 'developer', 'backend-engineer', 'web-engineer',
+  'mobile-engineer', 'qa-engineer', 'reviewer', 'security-engineer', 'devops-engineer', 'researcher',
+];
 /** How long the office may take to come back when it's restarting (a dev reload, an upgrade). */
 const RETRY_MS = 6000;
 /** Sending several workers home waits on git for each; hiring may fetch from GitHub first. */
@@ -117,7 +123,7 @@ export function parseArgs(argv) {
     return { cmd: 'pr', ...(none ? { unlink: true } : { pr: words[0] }), ...(opts['--worker'] !== undefined ? { worker: String(opts['--worker']).trim() } : {}), json: opts['--json'] === true };
   }
   if (cmd === 'hire') {
-    const { opts, words } = options(rest, ['--prompt', '--provider', '--model', '--effort', '--desk', '--issue'], ['--no-worktree', '--json']);
+    const { opts, words } = options(rest, ['--prompt', '--provider', '--model', '--effort', '--desk', '--issue', '--name', '--role'], ['--no-worktree', '--json']);
     if (words.length) throw new UsageError(`Unexpected argument: ${words[0]} (give the task on stdin or with --prompt)`);
     /** @type {Record<string, unknown>} */
     const out = { cmd: 'hire', json: opts['--json'] === true };
@@ -125,6 +131,9 @@ export function parseArgs(argv) {
     if (opts['--provider'] !== undefined) out.provider = String(opts['--provider']).trim();
     if (opts['--model'] !== undefined) out.model = String(opts['--model']).trim();
     if (opts['--desk'] !== undefined) out.desk = String(opts['--desk']).trim();
+    // The office checks both (a name's characters and being the only one on the floor, a role being one of ROLES) and says what's wrong.
+    if (opts['--name'] !== undefined) out.name = String(opts['--name']);
+    if (opts['--role'] !== undefined) out.role = String(opts['--role']).trim();
     if (opts['--no-worktree']) out.worktree = false;
     if (opts['--effort'] !== undefined) {
       if (!EFFORTS.includes(String(opts['--effort']))) throw new UsageError(`--effort is one of ${EFFORTS.join(', ')}`);
@@ -218,7 +227,8 @@ export async function call(what, body, io) {
 
 /** One worker, in a line. */
 export function formatWorker(w) {
-  const tags = [w.you ? 'you' : '', w.board ?? '', w.meeting ? 'meeting' : '', w.kind === 'shell' ? 'shell' : w.provider ?? ''].filter(Boolean);
+  // A role that isn't the default one says what the worker is for (a worker's name is only what it's called).
+  const tags = [w.you ? 'you' : '', w.board ?? '', w.meeting ? 'meeting' : '', w.kind === 'shell' ? 'shell' : w.provider ?? '', w.role && w.role !== 'general-worker' ? w.roleLabel ?? w.role : ''].filter(Boolean);
   const parts = [`${w.name}${tags.length ? ` (${tags.join(', ')})` : ''}`, w.status, w.desk];
   if (w.worktree) parts.push(`branch ${w.worktree.branch}${w.worktree.deleted ? ', worktree deleted: rebuild it at its desk' : ''}`);
   if (w.repos?.length) parts.push(`also in ${w.repos.map((r) => r.name).join(', ')}`);
@@ -264,14 +274,16 @@ export function formatLinked(answer) {
 /** The MCP protocol versions this server speaks; it answers in the client's when it knows it. */
 const MCP_VERSIONS = ['2025-11-25', '2025-06-18', '2025-03-26', '2024-11-05'];
 
-const WORKER_NOTE = 'A worker is named by its name (e.g. "Mochi") or its id, as list_workers shows them.';
+const WORKER_NOTE =
+  'A worker is named by its id or its name (e.g. "Mochi"), as list_workers shows them. Use the id when you have it: a name is only what the worker is called now, ' +
+  'a person can change it, and it says nothing about what the worker is for or may do (see its role).';
 
 export const TOOLS = [
   {
     name: 'list_workers',
     title: 'List workers',
     description:
-      "Lists the coding agents (the office's workers) at the desks on this Agent Office floor, and shells: each one's id, name, status, desk, task, git worktree branch and pull request " +
+      "Lists the coding agents (the office's workers) at the desks on this Agent Office floor, and shells: each one's id (which never changes), name (which a person can), role (what it was hired for: a label, not a permission), status, desk, task, git worktree branch and pull request " +
       '(pr; a worker that opened one the office does not show here needs link_pr). ' +
       'merged: true means a pull request of its merged and none is open: its work landed and it can go home. staying says why the office would not send it home by itself yet ' +
       '(still working, someone has its terminal open, a board agent...). worktree.deleted: true means its folder was deleted outside the office, so it cannot start until a person rebuilds it at its desk. you: true is you.',
@@ -294,6 +306,8 @@ export const TOOLS = [
         worktree: { type: 'boolean', description: 'Its own git worktree and branch (default true in a git checkout).' },
         desk: { type: 'string', description: 'A desk or bean bag id (desk-3). Default: the next free one.' },
         issue: { type: 'integer', minimum: 1, description: 'The GitHub issue it works on, assigned when it starts.' },
+        name: { type: 'string', maxLength: 32, description: 'What to call it, e.g. "Backend Engineer — Galexii": letters, numbers, spaces and - – — _ . , \' & + ( ), up to 32 characters, and not the name of another worker on this floor. Default: the next free one in the office\'s pool.' },
+        role: { type: 'string', enum: ROLES, description: 'What it is hired for (default general-worker). A label for telling workers apart: it gives the worker no permission it would not have had.' },
       },
       required: ['prompt'],
       additionalProperties: false,
