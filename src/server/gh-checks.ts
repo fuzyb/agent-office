@@ -58,9 +58,9 @@ export class CommitChecks {
   ) {}
 
   /** The checks the repository requires of a branch, when it says (null when it does not, or this login may not ask). Kept for ten minutes. */
-  async requiredChecks(base: string): Promise<string[] | null> {
+  async requiredChecks(base: string, fresh = false): Promise<string[] | null> {
     const hit = this.requiredByBase.get(base);
-    if (hit && Date.now() - hit.at < REQUIRED_TTL_MS) return hit.names;
+    if (!fresh && hit && Date.now() - hit.at < REQUIRED_TTL_MS) return hit.names;
     let names: string[] | null = null;
     try {
       const out = await this.run(['api', `repos/{owner}/{repo}/branches/${encodeURIComponent(base)}/protection/required_status_checks`, '--jq', '[(.contexts // [])[], ((.checks // [])[] | .context)] | unique | .[]'], this.dir);
@@ -77,7 +77,9 @@ export class CommitChecks {
    * pull request's card. Read-only. A commit whose checks are all done is remembered for good; one still
    * running, or with a failure, is asked again after a minute at the soonest.
    */
-  shaChecks(sha: string): Promise<ShaChecks> {
+  shaChecks(sha: string, fresh = false): Promise<ShaChecks> {
+    // Just before a merge nothing is taken from memory: GitHub is asked again.
+    if (fresh) return this.ask(sha);
     const kept = this.byRef.get(sha);
     if (kept && (isFinal(kept) || Date.now() - kept.at < SHA_RETRY_MS)) return Promise.resolve(kept);
     let pending = this.asking.get(sha);

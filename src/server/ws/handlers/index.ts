@@ -13,6 +13,7 @@ import { floorHandlers, projectView } from './floors.js';
 import { githubHandlers, issuesView, pullsView } from './github.js';
 import { jukeboxHandlers, jukeboxView } from './jukebox.js';
 import { meetingHandlers, meetingView } from './meetings.js';
+import { mergeHandlers } from './merge.js';
 import { planHandlers, planView } from './plan.js';
 import { presenceHandlers } from './presence.js';
 import { qaHandlers } from './qa.js';
@@ -40,6 +41,7 @@ export const handlers: HandlerMap<ClientMsg> = {
   ...githubHandlers,
   ...jukeboxHandlers,
   ...meetingHandlers,
+  ...mergeHandlers,
   ...planHandlers,
   ...presenceHandlers,
   ...qaHandlers,

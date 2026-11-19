@@ -1,4 +1,5 @@
 import { CommitChecks, checkOf, type PullExtra, type ShaChecks } from './gh-checks.js';
+import { MergeOps } from './gh-merge.js';
 import { execFile } from 'node:child_process';
 import type { GhCheck, GhCloseReason, GhComment, GhIssue, GhIssueDetail, GhLabel, GhMergeMethod, GhPull, GhPullDetail, GhRepoInfo, GhReviewComment, GhState } from '../shared/protocol.js';
 import type { GhAs } from './signins.js';
@@ -166,6 +167,8 @@ export class GitHub {
   private listing?: Promise<void>;
   private extra = new Map<number, PullExtra>();
   private commits: CommitChecks;
+  /** What the controlled automatic merge reads and does (see merge/service.ts). Nothing else uses it. */
+  readonly ops: MergeOps;
 
   constructor(
     private dir: string,
@@ -174,6 +177,7 @@ export class GitHub {
     private runGh: GhRunner = gh,
   ) {
     this.commits = new CommitChecks((args, cwd) => runGh(args, cwd), dir);
+    this.ops = new MergeOps((args, cwd) => runGh(args, cwd), dir);
   }
 
   start() {
@@ -195,8 +199,8 @@ export class GitHub {
   }
 
   /** The checks the repository requires of a branch, when it says (null when it does not, or this login may not ask). */
-  requiredChecks(base: string): Promise<string[] | null> {
-    return this.commits.requiredChecks(base);
+  requiredChecks(base: string, fresh = false): Promise<string[] | null> {
+    return this.commits.requiredChecks(base, fresh);
   }
 
   /** The head commit of pull request `n` right now, asked of GitHub (not the last sync's). Read-only. */
@@ -205,8 +209,8 @@ export class GitHub {
   }
 
   /** The checks of exactly commit `sha`, asked of GitHub by that SHA and kept (see CommitChecks). Read-only. */
-  shaChecks(sha: string): Promise<ShaChecks> {
-    return this.commits.shaChecks(sha);
+  shaChecks(sha: string, fresh = false): Promise<ShaChecks> {
+    return this.commits.shaChecks(sha, fresh);
   }
 
   /** The repository's full name and how it lets PRs merge. Asked once (again after a failure). */

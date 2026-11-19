@@ -20,8 +20,8 @@ const REVIEWERS: ReadonlySet<string> = new Set(['qa-engineer', 'reviewer']);
 export interface QaGitHub {
   readonly pulls: { readonly items: GhPull[] };
   extras(n: number): PullExtra | undefined;
-  requiredChecks(base: string): Promise<string[] | null>;
-  shaChecks(sha: string): Promise<ShaChecks>;
+  requiredChecks(base: string, fresh?: boolean): Promise<string[] | null>;
+  shaChecks(sha: string, fresh?: boolean): Promise<ShaChecks>;
   /** The head of the pull request right now, asked of GitHub. */
   pullHead(n: number): Promise<string>;
 }
@@ -64,6 +64,8 @@ export class QaService {
   private commits = new Map<string, ShaChecks>();
   private announced = new Set<string>();
   private going = new Map<string, Promise<boolean>>();
+  /** The open pull requests the last recompute used, so one that finishes late works from the latest, never an older list. */
+  private latest: GhPull[] = [];
   private requiredKnown = false;
   /** The checks each base branch requires, as the last sync found them (null: the repository did not say). */
   private required = new Map<string, string[] | null>();
@@ -99,7 +101,7 @@ export class QaService {
     const wanted = this.recompute(open, required);
     if (!wanted.length) return;
     const got = await Promise.all(wanted.map((sha) => this.confirmSha(sha)));
-    if (got.some(Boolean)) this.recompute(open, required);
+    if (got.some(Boolean)) this.recompute(this.latest, this.required);
   }
 
   /** Asks GitHub for the checks of exactly `sha`, unless it already answered and everything was done. Whether it changed anything. */
@@ -165,6 +167,7 @@ export class QaService {
 
   /** Recomputes every open pull request; tells the floor when anything changed. Returns the commits whose own checks are worth asking for. */
   private recompute(open: GhPull[], required: Map<string, string[] | null>): string[] {
+    this.latest = open;
     const next = new Map<number, PrAssessment>();
     const wanted: string[] = [];
     for (const p of open) {
@@ -194,6 +197,20 @@ export class QaService {
       this.events.emit(this.state());
     }
     return wanted;
+  }
+
+  /**
+   * Where pull request `n` stands, worked out again right now: its head and the checks of that exact commit asked of
+   * GitHub (not the last sync's), with the reviews held. Undefined when it is not open or its head is not the one the
+   * sync saw. Used just before a merge.
+   */
+  async reassess(n: number): Promise<PrAssessment | undefined> {
+    const p = this.github.pulls.items.find((x) => x.number === n && x.state === 'OPEN');
+    if (!p || !p.headRefOid || !this.github.extras(n)) return undefined;
+    if ((await this.github.pullHead(n)) !== p.headRefOid) return undefined;
+    const names = await this.github.requiredChecks(p.baseRefName, true).catch(() => null);
+    const exact = await this.github.shaChecks(p.headRefOid, true);
+    return assess(this.factsFor(p), { required: names ?? [], requiredKnown: names !== null, confirmed: exact.exact ? { sha: p.headRefOid, checks: exact.checks } : undefined, evidence: this.store.evidence, authors: this.authorsOf(p) });
   }
 
   private current(n: number): PrAssessment | string {
