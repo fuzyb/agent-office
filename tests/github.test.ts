@@ -110,7 +110,7 @@ test('pull request listing works when older gh versions reject optional fields',
     ]);
   };
   let pulls: GhState<GhPull> | undefined;
-  const github = new GitHub('/repo', () => {}, (state) => (pulls = state), runner);
+  const github = new GitHub('/repo', () => {}, (state) => (pulls = state), 'acme/app', runner);
 
   await (github as unknown as { refreshPulls(): Promise<void> }).refreshPulls();
 

@@ -76,6 +76,10 @@ Then, **immediately before merging, all of this is asked of GitHub again, not ta
 ask means no merge and a line in the audit saying why:
 
 - the pull request is open, not a draft, in this floor's repository, not from a fork, and aimed at an allowed branch;
+  "This floor's repository" is the `owner/name` the floor is configured for, nothing else: every `gh` call the office makes for a floor is pinned to
+  it (`src/server/gh-scope.ts`), never to whatever the checkout's remotes or `gh`'s remembered default say (on a fork's checkout that is often the
+  upstream), a pull request whose URL belongs to another repository is dropped before QA, assignment or merging see it, and with no repository
+  configured nothing runs.
 - its head is still the commit that was reviewed;
 - **the change itself, read again, pinned to that commit:** not billing, payments, subscriptions or spending, not the rules, and which tier;
 - the login the office runs as may merge there;

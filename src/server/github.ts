@@ -1,5 +1,6 @@
 import { CommitChecks, checkOf, type PullExtra, type ShaChecks } from './gh-checks.js';
 import { MergeOps } from './gh-merge.js';
+import { ForeignRows, repoOfUrl, sameRepo, scopeGh, type GhRunner } from './gh-scope.js';
 import { execFile } from 'node:child_process';
 import type { GhCheck, GhCloseReason, GhComment, GhIssue, GhIssueDetail, GhLabel, GhMergeMethod, GhPull, GhPullDetail, GhRepoInfo, GhReviewComment, GhState } from '../shared/protocol.js';
 import type { GhAs } from './signins.js';
@@ -7,7 +8,6 @@ import type { GhAs } from './signins.js';
 const REFRESH_MS = 90_000;
 /** How long the repo's list of labels is kept before the label picker asks GitHub again. */
 const LABELS_MS = 60_000;
-type GhRunner = (args: string[], cwd: string, timeout?: number, env?: Record<string, string>) => Promise<string>;
 
 /** Turns gh's stderr into something a person standing at the board can act on. */
 export function friendlyGhError(raw: string): string {
@@ -170,14 +170,33 @@ export class GitHub {
   /** What the controlled automatic merge reads and does (see merge/service.ts). Nothing else uses it. */
   readonly ops: MergeOps;
 
+  /** Every gh call this class makes, pinned to the floor's own repository (see gh-scope.ts): never whatever the checkout's remotes or gh's default say. */
+  private runGh: GhRunner;
+
+  /**
+   * `scope` is the floor's explicitly configured `owner/name`. With none, nothing repository-scoped runs. Whatever GitHub answers is
+   * checked to belong to it too, so a pull request of another repository (the upstream of a fork) is never shown or acted on.
+   */
   constructor(
     private dir: string,
     private onIssues: (s: GhState<GhIssue>) => void,
     private onPulls: (s: GhState<GhPull>) => void,
-    private runGh: GhRunner = gh,
+    private scope: string | undefined,
+    runGh: GhRunner = gh,
   ) {
-    this.commits = new CommitChecks((args, cwd) => runGh(args, cwd), dir);
-    this.ops = new MergeOps((args, cwd) => runGh(args, cwd), dir);
+    this.runGh = scopeGh(runGh, scope);
+    this.commits = new CommitChecks((args, cwd) => this.runGh(args, cwd), dir);
+    this.ops = new MergeOps((args, cwd) => this.runGh(args, cwd), dir);
+  }
+
+  /** The rows of this repository: any that belong to another one are dropped, and a list with nothing else in it is an error, not an empty board. */
+  private own<T extends { url?: unknown }>(rows: T[], what: string): T[] {
+    const mine = rows.filter((r) => {
+      const named = repoOfUrl(r.url);
+      return !named || sameRepo(named, this.scope);
+    });
+    if (rows.length && !mine.length) throw new ForeignRows(`GitHub returned ${what} of ${repoOfUrl(rows[0].url)}, not of ${this.scope}, so none are shown.`);
+    return mine;
   }
 
   start() {
@@ -217,6 +236,7 @@ export class GitHub {
   repoInfo(): Promise<GhRepoInfo> {
     this.repo ??= this.runGh(['repo', 'view', '--json', 'nameWithOwner,squashMergeAllowed,mergeCommitAllowed,rebaseMergeAllowed'], this.dir).then((out) => {
       const r = JSON.parse(out);
+      if (!sameRepo(String(r.nameWithOwner), this.scope)) throw new Error(`GitHub says this repository is ${r.nameWithOwner}, not ${this.scope}: check the floor's repository.`);
       const methods = (['squash', 'merge', 'rebase'] as const).filter((m) => r[{ squash: 'squashMergeAllowed', merge: 'mergeCommitAllowed', rebase: 'rebaseMergeAllowed' }[m]]);
       return { nameWithOwner: String(r.nameWithOwner), methods: methods.length ? methods : ['squash', 'merge', 'rebase'] };
     });
@@ -478,7 +498,7 @@ export class GitHub {
         this.runGh(['issue', 'list', '--state', 'open', '--limit', '300', '--json', fields], this.dir),
         this.runGh(['issue', 'list', '--state', 'closed', '--limit', '40', '--json', fields], this.dir),
       ]);
-      const fetched: GhIssue[] = [...JSON.parse(open), ...JSON.parse(closed)].map((i: any) => ({
+      const fetched: GhIssue[] = this.own([...JSON.parse(open), ...JSON.parse(closed)], 'issues').map((i: any) => ({
         number: i.number,
         title: i.title,
         state: i.state,
@@ -494,7 +514,7 @@ export class GitHub {
       const items = this.claims.mark(this.relabel('issue', fetched, asked), asked);
       this.issues = { items, fetchedAt: Date.now(), loading: false };
     } catch (err) {
-      this.issues = { ...this.issues, loading: false, error: (err as Error).message, fetchedAt: Date.now() };
+      this.issues = { ...this.issues, ...(err instanceof ForeignRows ? { items: [] } : {}), loading: false, error: (err as Error).message, fetchedAt: Date.now() };
     }
     this.onIssues(this.issues);
   }
@@ -538,7 +558,9 @@ export class GitHub {
       this.extra = new Map(open.filter((p: any) => p.state === 'OPEN' && typeof p.headRefOid === 'string').map((p: any) => [p.number, { sha: p.headRefOid, mergeable: String(p.mergeable ?? 'UNKNOWN'), mergeState: String(p.mergeStateStatus ?? 'UNKNOWN'), ...(Array.isArray(p.files) ? { files: p.files.map((f: any) => String(f.path)) } : {}), fork: p.isCrossRepository === true, checks: (p.statusCheckRollup ?? []).map(checkOf) }]));
       this.pulls = { items, fetchedAt: Date.now(), loading: false };
     } catch (err) {
-      this.pulls = { ...this.pulls, loading: false, error: (err as Error).message, fetchedAt: Date.now() };
+      // Another repository's rows are never kept: what was shown before is cleared with the error, not left on the board. Only what is in memory is dropped; the next look refills it.
+      if (err instanceof ForeignRows) this.extra = new Map();
+      this.pulls = { ...this.pulls, ...(err instanceof ForeignRows ? { items: [] } : {}), loading: false, error: (err as Error).message, fetchedAt: Date.now() };
     }
     this.onPulls(this.pulls);
   }
@@ -548,7 +570,7 @@ export class GitHub {
     for (;;) {
       try {
         const out = await this.runGh(['pr', 'list', '--state', state, '--limit', String(limit), '--json', fields.join(',')], this.dir);
-        return JSON.parse(out);
+        return this.own(JSON.parse(out), 'pull requests');
       } catch (err) {
         const field = unsupportedJsonField((err as Error).message);
         if (!field || REQUIRED_PULL_LIST_FIELDS.has(field) || !fields.includes(field)) throw err;

@@ -16,6 +16,7 @@ import type { GhPull } from '../../shared/protocol.js';
 import type { PrAssessment, QaViewState } from '../../shared/protocol/qa.js';
 import type { PullExtra, ShaChecks } from '../gh-checks.js';
 import type { MergeOps } from '../gh-merge.js';
+import { repoOfUrl, sameRepo } from '../gh-scope.js';
 import { FloorMergeStore, PolicyWriteError, type MergePolicyStore } from './store.js';
 
 /** What merging needs of QA: where each pull request stands, and the same worked out again now, from GitHub. */
@@ -91,6 +92,11 @@ export class MergeService {
     return { policy };
   }
 
+  /** Whether this pull request belongs to the floor's own repository, by its URL. One whose URL does not say (or says another repository, such as the upstream of a fork) is never acted on. */
+  private mine(p: GhPull): boolean {
+    return sameRepo(repoOfUrl(p.url), this.d.repo());
+  }
+
   /** Whether anything unattended may happen right now: the gate is open, nobody pressed stop, and this repository is switched on. */
   on(): boolean {
     return typeof this.active() !== 'string';
@@ -120,7 +126,7 @@ export class MergeService {
   async scan(items: GhPull[]): Promise<void> {
     if (typeof this.active() === 'string') return;
     for (const p of items) {
-      if (p.state !== 'OPEN' || p.isDraft || !p.headRefOid || this.scans.has(p.headRefOid) || !this.d.extras(p.number)) continue;
+      if (!this.mine(p) || p.state !== 'OPEN' || p.isDraft || !p.headRefOid || this.scans.has(p.headRefOid) || !this.d.extras(p.number)) continue;
       try {
         await this.read(p.baseRefName, p.headRefOid);
       } catch {
@@ -135,6 +141,7 @@ export class MergeService {
     if (typeof on === 'string') return on;
     const p = this.d.pulls().find((x) => x.number === n && x.state === 'OPEN');
     if (!p || p.headRefOid !== sha) return 'it is not the head that was asked about';
+    if (!this.mine(p)) return `it is not a pull request of ${this.repo()}`;
     if (!this.scans.has(sha)) return 'its changes have not been read yet, so billing and spending are not ruled out';
     const c = this.classification(p, on.policy);
     return c.verdict === 'eligible' ? true : c.reasons[0];
@@ -152,7 +159,7 @@ export class MergeService {
     const prs: MergePr[] = [];
     for (const q of this.d.qa.state().prs) {
       const p = this.d.pulls().find((x) => x.number === q.number);
-      if (!p) continue;
+      if (!p || !this.mine(p)) continue;
       const c = this.classification(p, policy);
       const approval = this.store.approvals.get(q.number);
       const mine = approval && approval.sha === q.sha ? approval : undefined;
@@ -284,7 +291,7 @@ export class MergeService {
     if (typeof on === 'string') return { ok: false, message: `Not approved: ${on}` };
     const q = this.d.qa.state().prs.find((x) => x.number === n);
     const p = this.d.pulls().find((x) => x.number === n);
-    if (!q || !p) return { ok: false, message: `No open pull request #${n} on this floor` };
+    if (!q || !p || !this.mine(p)) return { ok: false, message: `No open pull request #${n} on this floor` };
     if (q.sha !== sha) return { ok: false, message: `PR #${n} changed since you looked (the head is now ${q.sha.slice(0, 7)}): an approval is about one commit` };
     const c = this.classification(p, on.policy);
     if (c.verdict !== 'eligible') return { ok: false, message: `Not eligible for automatic merging: ${c.reasons[0]}. A person merges it` };
@@ -321,7 +328,7 @@ export class MergeService {
   /** Once per commit: a pull request that is not the office's to merge (money, the rules themselves, not fully known) is written down and shown to the owner. */
   private flagPeople(policy: RepoMergePolicy) {
     for (const p of this.d.pulls()) {
-      if (p.state !== 'OPEN' || p.isDraft || !p.headRefOid || !this.d.extras(p.number)) continue;
+      if (!this.mine(p) || p.state !== 'OPEN' || p.isDraft || !p.headRefOid || !this.d.extras(p.number)) continue;
       const c = this.classification(p, policy);
       if (c.verdict !== 'human' || (!c.hard && !this.scans.has(p.headRefOid))) continue;
       const key = `${p.number}@${p.headRefOid}`;
@@ -338,7 +345,7 @@ export class MergeService {
     const { policy } = on;
     const q = this.d.qa.state().prs.find((x) => x.number === n);
     const p = this.d.pulls().find((x) => x.number === n);
-    if (!q || !p) return { merged: false, message: `No open pull request #${n} on this floor` };
+    if (!q || !p || !this.mine(p)) return { merged: false, message: `No open pull request #${n} of ${this.repo() || 'this floor'}` };
     const sha = q.sha;
     const key = `${n}@${sha}`;
     const refuse = (reasons: string[], kind: AuditKind = 'blocked') => {

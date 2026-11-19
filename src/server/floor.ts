@@ -242,6 +242,8 @@ export class Floor {
         this.sendLandedHome();
         ctx.pullsChanged(this);
       },
+      // The floor's configured repository, and only that: every gh call is pinned to it, never to a remote or gh's default (see gh-scope.ts).
+      def.repo,
     );
     // The 📋 task queue seats workers by itself: it watches the workers and links PRs from GitHub.
     this.queue = new TaskQueue(dataDir, this.workers, !!this.project.branch, {

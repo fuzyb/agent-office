@@ -464,7 +464,7 @@ test('what is asked of GitHub is read-only, keyed by commit, and kept; nothing m
     if (args[0] === 'pr') return '[]';
     return '';
   };
-  const gh = new GitHub(tmp('gh'), () => {}, () => {}, run);
+  const gh = new GitHub(tmp('gh'), () => {}, () => {}, 'o/r', run);
   const first = await gh.shaChecks(SHA1);
   assert.deepEqual([first.exact, first.checks.map((c) => [c.name, c.state])], [true, [['test', 'pass'], ['lint', 'pass'], ['external', 'pass']]]);
   await gh.shaChecks(SHA1);
@@ -480,10 +480,10 @@ test('what is asked of GitHub is read-only, keyed by commit, and kept; nothing m
     assert.ok(!/merge|review|comment|rerun|dispatches|\/runs\//.test(c.join(' ')), c.join(' '));
   }
   // A check run that belongs to another commit is not taken for this one.
-  const odd = new GitHub(tmp('gh2'), () => {}, () => {}, async (args: string[]) => (args[1].includes('/check-runs') ? `${JSON.stringify({ name: 'test', status: 'completed', conclusion: 'success', sha: SHA2 })}\n` : ''));
+  const odd = new GitHub(tmp('gh2'), () => {}, () => {}, 'o/r', async (args: string[]) => (args[1].includes('/check-runs') ? `${JSON.stringify({ name: 'test', status: 'completed', conclusion: 'success', sha: SHA2 })}\n` : ''));
   assert.equal((await odd.shaChecks(SHA1)).exact, false);
   // A repository that will not say what is required, or a login that may not ask, is not an error.
-  const mute = new GitHub(tmp('gh3'), () => {}, () => {}, async () => { throw new Error('404'); });
+  const mute = new GitHub(tmp('gh3'), () => {}, () => {}, 'o/r', async () => { throw new Error('404'); });
   assert.equal(await mute.requiredChecks('main'), null);
 });
 

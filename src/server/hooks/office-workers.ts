@@ -4,6 +4,7 @@ import { AGENT, inventory, preview } from '../dispatch/dispatcher.js';
 import { officeOf } from '../dispatch/office.js';
 import { findWorker, readHireRequest, readHomeRequest, readPrRequest, workerRow, type PullsView } from '../office-workers.js';
 import { gh } from '../github.js';
+import { repoOfUrl, sameRepo } from '../gh-scope.js';
 import type { Floor } from '../floor.js';
 import { nextFreeSeat } from '../../shared/layout.js';
 import type { WorkerInfo } from '../../shared/protocol.js';
@@ -21,8 +22,11 @@ async function pullOf(floor: Floor, n: number, repo?: string): Promise<{ number:
   const listed = floor.github.pulls.items.find((p) => p.number === n);
   let pr: { url: string; state: string } | undefined = listed;
   if (!pr) {
+    // Pinned to the floor's own repository: never the upstream of a fork, whatever the checkout's remotes or gh's default say.
+    if (!here) return 'This floor has no GitHub repository configured, so the office will not guess one';
     try {
-      pr = JSON.parse(await gh(['pr', 'view', String(n), '--json', 'url,state'], floor.dir)) as { url: string; state: string };
+      pr = JSON.parse(await gh(['pr', 'view', String(n), '--repo', here, '--json', 'url,state'], floor.dir)) as { url: string; state: string };
+      if (!sameRepo(repoOfUrl(pr.url), here)) return `PR #${n} is in ${repoOfUrl(pr.url) ?? 'another repository'}, and this floor is ${here}`;
     } catch (err) {
       return `No pull request #${n} here: ${(err as Error).message}`;
     }
