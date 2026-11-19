@@ -11,6 +11,7 @@ import type { FloorClientMsg, FloorServerMsg, PlanClientMsg } from './protocol/f
 import type { GitHubClientMsg, GitHubServerMsg } from './protocol/github.js';
 import type { MeetingClientMsg, MeetingServerMsg } from './protocol/meetings.js';
 import type { PresenceClientMsg, PresenceServerMsg } from './protocol/presence.js';
+import type { QaClientMsg, QaServerMsg } from './protocol/qa.js';
 import type { QueueClientMsg, QueueServerMsg } from './protocol/queue.js';
 import type { RooftopClientMsg, RooftopServerMsg } from './protocol/rooftop.js';
 import type { SettingsClientMsg, SettingsServerMsg } from './protocol/settings.js';
@@ -26,6 +27,7 @@ export * from './protocol/floors.js';
 export * from './protocol/github.js';
 export * from './protocol/meetings.js';
 export * from './protocol/presence.js';
+export * from './protocol/qa.js';
 export * from './protocol/queue.js';
 export * from './protocol/rooftop.js';
 export * from './protocol/settings.js';
@@ -40,6 +42,7 @@ export type ClientMsg =
   | GitHubClientMsg
   | QueueClientMsg
   | DispatchClientMsg
+  | QaClientMsg
   | MeetingClientMsg
   | FloorClientMsg
   | PlanClientMsg
@@ -70,4 +73,5 @@ export type ServerMsg =
   | SettingsServerMsg
   | UsageServerMsg
   | ToysServerMsg
-  | DispatchServerMsg;
+  | DispatchServerMsg
+  | QaServerMsg;

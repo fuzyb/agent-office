@@ -22,6 +22,7 @@ import type { BoardActions } from './ui/github/prompts';
 import { openPull, routePullMessage } from './ui/pull';
 import { openQueue } from './ui/queue';
 import { routeDispatchMessage } from './ui/dispatch';
+import { routeQaMessage } from './ui/qa';
 import { openAsk } from './ui/ask';
 import { openMeeting, type MeetingPreset } from './ui/meeting';
 import { openSignIns } from './ui/signins';
@@ -57,6 +58,7 @@ net.onMessage((msg) => {
   routePullMessage(msg);
   routeWorktreeMessage(msg);
   routeDispatchMessage(msg);
+  routeQaMessage(msg);
   switch (msg.t) {
     case 'welcome': {
       // Back from a restart on another version: this page's code is stale, so load the new one.

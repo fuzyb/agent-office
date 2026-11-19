@@ -1,3 +1,4 @@
+import { CommitChecks, checkOf, type PullExtra, type ShaChecks } from './gh-checks.js';
 import { execFile } from 'node:child_process';
 import type { GhCheck, GhCloseReason, GhComment, GhIssue, GhIssueDetail, GhLabel, GhMergeMethod, GhPull, GhPullDetail, GhRepoInfo, GhReviewComment, GhState } from '../shared/protocol.js';
 import type { GhAs } from './signins.js';
@@ -50,20 +51,6 @@ function checksOf(rollup: any[]): GhPull['checks'] {
   return pending ? 'pending' : 'pass';
 }
 
-const FAILED = ['FAILURE', 'ERROR', 'CANCELLED', 'TIMED_OUT', 'ACTION_REQUIRED', 'STARTUP_FAILURE'];
-
-/** One entry of statusCheckRollup: a CheckRun (Actions) or a StatusContext (other CI). */
-function checkOf(c: any): GhCheck {
-  const concl = String(c.conclusion ?? c.state ?? '').toUpperCase();
-  const status = String(c.status ?? '').toUpperCase();
-  let state: GhCheck['state'] = 'pass';
-  if (FAILED.includes(concl)) state = 'fail';
-  else if ((status && status !== 'COMPLETED') || !concl || concl === 'PENDING' || concl === 'EXPECTED') state = 'pending';
-  else if (['SKIPPED', 'NEUTRAL', 'STALE'].includes(concl)) state = 'skip';
-  const name = String(c.name ?? c.context ?? 'check');
-  return { name: c.workflowName ? `${c.workflowName} / ${name}` : name, state, url: c.detailsUrl ?? c.targetUrl ?? undefined };
-}
-
 function commentsOf(raw: any[]): GhComment[] {
   return (raw ?? []).map((c: any) => ({
     id: String(c.id),
@@ -96,6 +83,9 @@ const PULL_LIST_FIELDS = [
   'closingIssuesReferences',
 ];
 const REQUIRED_PULL_LIST_FIELDS = new Set(['number', 'title', 'state']);
+/** More of an open pull request than its card shows, for the QA view (see GitHub.extras). Left out of the list of merged and closed ones. */
+const PULL_OPEN_EXTRA_FIELDS = ['mergeable', 'mergeStateStatus', 'files', 'isCrossRepository'];
+
 
 function unsupportedJsonField(message: string): string | undefined {
   return /^Unknown JSON field: "([^"]+)"/i.exec(message.trim())?.[1];
@@ -174,13 +164,17 @@ export class GitHub {
   private claims = new Claims();
   /** The look at the issues that's under way, if one is. */
   private listing?: Promise<void>;
+  private extra = new Map<number, PullExtra>();
+  private commits: CommitChecks;
 
   constructor(
     private dir: string,
     private onIssues: (s: GhState<GhIssue>) => void,
     private onPulls: (s: GhState<GhPull>) => void,
     private runGh: GhRunner = gh,
-  ) {}
+  ) {
+    this.commits = new CommitChecks((args, cwd) => runGh(args, cwd), dir);
+  }
 
   start() {
     void this.refresh();
@@ -193,6 +187,26 @@ export class GitHub {
 
   async refresh() {
     await Promise.all([this.refreshIssues(), this.refreshPulls()]);
+  }
+
+  /** What the QA view needs of open pull request `n`, from the last sync. */
+  extras(n: number): PullExtra | undefined {
+    return this.extra.get(n);
+  }
+
+  /** The checks the repository requires of a branch, when it says (null when it does not, or this login may not ask). */
+  requiredChecks(base: string): Promise<string[] | null> {
+    return this.commits.requiredChecks(base);
+  }
+
+  /** The head commit of pull request `n` right now, asked of GitHub (not the last sync's). Read-only. */
+  async pullHead(n: number): Promise<string> {
+    return (await this.runGh(['pr', 'view', String(n), '--json', 'headRefOid', '--jq', '.headRefOid'], this.dir)).trim();
+  }
+
+  /** The checks of exactly commit `sha`, asked of GitHub by that SHA and kept (see CommitChecks). Read-only. */
+  shaChecks(sha: string): Promise<ShaChecks> {
+    return this.commits.shaChecks(sha);
   }
 
   /** The repository's full name and how it lets PRs merge. Asked once (again after a failure). */
@@ -517,6 +531,7 @@ export class GitHub {
         closes: (p.closingIssuesReferences ?? []).map((r: any) => Number(r.number)).filter((n: number) => Number.isInteger(n) && n > 0),
       }));
       const items = this.relabel('pull', fetched, asked);
+      this.extra = new Map(open.filter((p: any) => p.state === 'OPEN' && typeof p.headRefOid === 'string').map((p: any) => [p.number, { sha: p.headRefOid, mergeable: String(p.mergeable ?? 'UNKNOWN'), mergeState: String(p.mergeStateStatus ?? 'UNKNOWN'), ...(Array.isArray(p.files) ? { files: p.files.map((f: any) => String(f.path)) } : {}), fork: p.isCrossRepository === true, checks: (p.statusCheckRollup ?? []).map(checkOf) }]));
       this.pulls = { items, fetchedAt: Date.now(), loading: false };
     } catch (err) {
       this.pulls = { ...this.pulls, loading: false, error: (err as Error).message, fetchedAt: Date.now() };
@@ -525,7 +540,7 @@ export class GitHub {
   }
 
   private async listPulls(state: string, limit: number): Promise<any[]> {
-    let fields = [...PULL_LIST_FIELDS];
+    let fields = [...PULL_LIST_FIELDS, ...(state === 'open' ? PULL_OPEN_EXTRA_FIELDS : [])];
     for (;;) {
       try {
         const out = await this.runGh(['pr', 'list', '--state', state, '--limit', String(limit), '--json', fields.join(',')], this.dir);

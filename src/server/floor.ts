@@ -11,6 +11,7 @@ import { WorkerManager, workedMs, type HookEnv, type RunAs } from './workers.js'
 import { GitHub, MergeWatch } from './github.js';
 import type { GhAs } from './signins.js';
 import { TaskQueue } from './queue.js';
+import { QaService } from './qa/service.js';
 import { Changes } from './changes.js';
 import { Decor } from './decor.js';
 import { FloorPlanStore } from './floorplan.js';
@@ -70,6 +71,8 @@ export interface FloorContext {
   lent(floor: Floor): boolean;
   /** Whether the building's map locks up workers sent home (see MapPlan.sendHome), instead of letting them go. */
   locksUp(): boolean;
+  /** The office's Claude plan limits, for dispatch (see server/dispatch/). */
+  planLimits(): import('../shared/protocol.js').PlanLimits;
 }
 
 /** The open pull request on a floor's board whose head is `branch`. */
@@ -115,6 +118,8 @@ export class Floor {
   readonly workers: WorkerManager;
   readonly github: GitHub;
   readonly queue: TaskQueue;
+  /** Where this floor's pull requests stand, and the reviews held for them (see server/qa/). */
+  readonly qa: QaService;
   readonly changes: Changes;
   readonly decor: Decor;
   /** The signs over its desks, and how far its back office is built out. */
@@ -214,6 +219,8 @@ export class Floor {
         ctx.emit(this, { t: 'gh.pulls', state });
         this.queue?.onPulls(state.items);
         if (state.loading || state.error) return;
+        // The sync just reported: work out where each pull request stands. No timer of its own, nothing asked of a model.
+        void this.qa?.onPulls(state.items);
         // A worker may have opened one from a branch it made itself, mid-turn or from a shell.
         void this.workers.syncBranches();
         for (const p of this.merges.look(state.items)) {
@@ -245,6 +252,8 @@ export class Floor {
       },
       worktreeNote: () => officePrompt(ctx.prompts, 'queue.worktree'),
     });
+
+    this.qa = new QaService(dataDir, this, () => ({ floors: () => [this], planLimits: () => ctx.planLimits() }), this.github, { emit: (state) => ctx.emit(this, { t: 'qa.state', state }, true), toast: (text) => ctx.toast(this, text) });
 
     // Meetings seat their own workers round the meeting room's table and run them round by round.
     const workers = this.workers;
