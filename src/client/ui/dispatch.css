@@ -1,0 +1,25 @@
+/* 🧭 Dispatch (ui/dispatch.ts) */
+.dispatch h4 { display: flex; align-items: center; gap: 8px; margin: 18px 0 8px; font-size: 14px; font-weight: 900; text-transform: uppercase; letter-spacing: .04em; }
+.dispatch h4 .count { color: var(--muted); }
+.dispatch .note { margin: 8px 0 0; font-size: 13px; font-weight: 600; color: var(--muted); line-height: 1.45; }
+.dispatch .note.warn, .dispatch .warn { color: var(--bad); }
+.dispatch-tasks, .dispatch-running { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; }
+.dispatch-tasks > li, .dispatch-running > li { padding: 8px 12px; border: 3px solid var(--ink); border-radius: 14px; background: #fff; box-shadow: 0 3px 0 var(--ink); }
+.dispatch-running > li { background: #e7f8ee; }
+.dispatch-task-head { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+.dispatch-ask { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; margin-top: 6px; font-size: 13px; font-weight: 700; }
+.dispatch-ask select { padding: 4px 8px; border: 2px solid var(--ink); border-radius: 9px; font: inherit; font-size: 13px; background: #fff; }
+.dispatch-candidates { margin: 8px 0 0; padding-left: 22px; display: flex; flex-direction: column; gap: 6px; }
+.dispatch-candidates li { font-weight: 700; }
+.dispatch-candidates .btn { margin-top: 4px; }
+.dispatch .reason { font-size: 12px; font-weight: 600; color: var(--muted); line-height: 1.35; }
+.dispatch-blocked { margin: 6px 0 0; padding-left: 20px; font-size: 13px; }
+.dispatch .pill { display: inline-block; margin-left: 6px; padding: 1px 8px; border: 2px solid var(--ink); border-radius: 999px; background: var(--paper-2); font-size: 11px; font-weight: 800; }
+.dispatch .pill.good { background: #c8f7dc; }
+.dispatch .pill.warn { background: #ffe8a3; }
+.dispatch-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.dispatch-table th { text-align: left; padding: 4px 8px; font-size: 11px; text-transform: uppercase; letter-spacing: .04em; color: var(--muted); }
+.dispatch-table td { padding: 6px 8px; border-top: 2px solid var(--paper-2); vertical-align: top; }
+.dispatch-table tr.unavailable td, .dispatch-table tr.busy td { color: var(--muted); }
+.dispatch details { margin-top: 10px; font-weight: 700; font-size: 13px; }
+@media (max-width: 640px) { .dispatch-table thead { display: none; } .dispatch-table tr { display: block; padding: 4px 0; } .dispatch-table td { display: block; border: 0; padding: 1px 4px; } }

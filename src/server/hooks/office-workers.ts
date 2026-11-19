@@ -1,5 +1,7 @@
 import type http from 'node:http';
 import { notLeaving } from '../leave-on-merge.js';
+import { AGENT, inventory, preview } from '../dispatch/dispatcher.js';
+import { officeOf } from '../dispatch/office.js';
 import { findWorker, readHireRequest, readHomeRequest, readPrRequest, workerRow, type PullsView } from '../office-workers.js';
 import { gh } from '../github.js';
 import type { Floor } from '../floor.js';
@@ -51,6 +53,12 @@ export async function officeWorkers(ctx: Ctx, req: http.IncomingMessage, res: ht
     return w && workerRow(w, view, me.id);
   };
   const action = url.pathname.slice('/office/workers'.length);
+  // Looking only: who could take a task, never giving one. Giving one is a person's confirmation in the browser.
+  if (req.method === 'GET' && action === '/inventory') return send(res, 200, inventory(officeOf(ctx), floor, AGENT));
+  if (req.method === 'GET' && action === '/preview') {
+    const p = preview(officeOf(ctx), floor, str(url.searchParams.get('task'), 32), AGENT);
+    return typeof p === 'string' ? send(res, 404, { error: p }) : send(res, 200, p);
+  }
   if (req.method === 'GET' && !action) {
     const list = floor.workers.list();
     const free = nextFreeSeat((id) => floor.workers.deskOccupied(id), floor.plan.wing);
@@ -65,7 +73,7 @@ export async function officeWorkers(ctx: Ctx, req: http.IncomingMessage, res: ht
       workers: list.map((w) => workerRow(w, view, me.id)),
     });
   }
-  if (req.method !== 'POST' || !['', '/home', '/tell', '/pr'].includes(action)) return send(res, 405, { error: 'GET /office/workers, or POST to /office/workers, /office/workers/home, /office/workers/tell or /office/workers/pr' });
+  if (req.method !== 'POST' || !['', '/home', '/tell', '/pr'].includes(action)) return send(res, 405, { error: 'GET /office/workers, /office/workers/inventory or /office/workers/preview?task=<id>, or POST to /office/workers, /office/workers/home, /office/workers/tell or /office/workers/pr' });
   let body: unknown;
   try {
     body = JSON.parse((await readBody(req)) || '{}');
