@@ -88,12 +88,17 @@ function shellQuote(value: string): string {
 
 /**
  * Build the CLI config overrides for all lifecycle hooks. The command is encoded as a TOML basic
- * string so paths containing spaces remain valid; the command itself is shell-quoted.
+ * string so paths containing spaces remain valid. Windows commands use an environment-provided
+ * helper path; POSIX commands retain shell quoting.
  */
-export function codexHookArgs(hookPath: string): string[] {
+export function codexHookArgs(hookPath: string, platform: NodeJS.Platform = process.platform): string[] {
   const args: string[] = [];
   for (const event of CODEX_HOOK_EVENTS) {
-    const command = [process.execPath, hookPath, event].map(shellQuote).join(' ');
+    // Windows runners include cmd and PowerShell. Keep paths out of both shells' expansion rules;
+    // the provider supplies the helper path in env and prepends this Node install to PATH.
+    const command = platform === 'win32'
+      ? `node.exe -e "require(process.env.AGENT_OFFICE_CODEX_HOOK)" agent-office-codex-hook.cjs ${event}`
+      : [process.execPath, hookPath, event].map(shellQuote).join(' ');
     const config = `hooks.${event}=[{hooks=[{type="command",command=${JSON.stringify(command)},timeout=3}]}]`;
     args.push('-c', config);
   }
@@ -149,7 +154,7 @@ process.stdin.on('error', () => finish(false));
 process.stdin.on('end', async () => {
   if (overflow || !EVENTS.has(event)) return finish(false);
   let input;
-  try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return finish(false); }
+  try { input = JSON.parse(Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, '')); } catch { return finish(false); }
   if (!input || typeof input !== 'object' || Array.isArray(input)) return finish(false);
   if (hasText(input.agent_id) || hasText(input.agent_type)) return finish(false);
   const session = allowed(input.session_id, MAX_ID);
