@@ -9,6 +9,8 @@ import {
   CODEX_HOOK_EVENTS,
   codexHookArgs,
   codexModelArgs,
+  codexPermissionArgs,
+  codexPermissions,
   normalizeCodexHook,
   validateCodexHook,
   writeCodexHook,
@@ -114,6 +116,47 @@ test('generated hooks execute through the native shell with spaced Unicode and a
   } finally {
     await new Promise<void>((resolve) => server.close(() => resolve()));
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Codex workers get the workspace preset unless the office or --agent-args says otherwise', () => {
+  const workspace = ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request', '-c', 'sandbox_workspace_write.network_access=true'];
+  assert.equal(codexPermissions(undefined), 'workspace');
+  assert.equal(codexPermissions(''), 'workspace');
+  assert.equal(codexPermissions(' Native '), 'native');
+  assert.equal(codexPermissions('FULL'), 'full');
+  assert.equal(codexPermissions('anything else'), 'workspace');
+  assert.deepEqual(codexPermissionArgs([], 'workspace'), workspace);
+  assert.deepEqual(codexPermissionArgs(['--model', 'gpt-5.5', '-c', 'model_reasoning_effort="high"'], 'workspace'), workspace);
+  assert.deepEqual(codexPermissionArgs([], 'native'), []);
+  assert.deepEqual(codexPermissionArgs([], 'full'), ['--sandbox', 'danger-full-access', '--ask-for-approval', 'never']);
+  for (const own of [['--yolo'], ['--full-auto'], ['-s', 'read-only'], ['--sandbox=read-only'], ['-a', 'never'], ['--ask-for-approval', 'never'],
+    ['--dangerously-bypass-approvals-and-sandbox'], ['-c', 'approval_policy="never"'], ['--config', 'sandbox_mode="read-only"'], ['-c', 'sandbox_workspace_write.network_access=false']]) {
+    assert.deepEqual(codexPermissionArgs(own, 'workspace'), [], own.join(' '));
+    assert.deepEqual(codexPermissionArgs(own, 'full'), [], own.join(' '));
+  }
+  // A value that merely mentions a setting is not one.
+  assert.deepEqual(codexPermissionArgs(['--model', '-sandboxed'], 'workspace'), workspace);
+});
+
+test('the launch puts the permission flags ahead of resume and the prompt', () => {
+  const before = process.env.AGENT_OFFICE_CODEX_PERMISSIONS;
+  try {
+    delete process.env.AGENT_OFFICE_CODEX_PERMISSIONS;
+    const h = { info: {}, state: codex.createState!() } as never;
+    const { args } = codex.launch({ h, args: [], prompt: 'do it', resumeSessionId: 'thread-1', setup: { hook: '/tmp/hook.cjs' } } as never);
+    const at = (s: string) => args.indexOf(s);
+    assert.ok(at('--sandbox') >= 0 && at('--sandbox') < at('resume'));
+    assert.equal(args[at('--sandbox') + 1], 'workspace-write');
+    assert.equal(args[at('--ask-for-approval') + 1], 'on-request');
+    assert.ok(at('resume') < at('--'));
+    process.env.AGENT_OFFICE_CODEX_PERMISSIONS = 'native';
+    const native = codex.launch({ h, args: [], setup: { hook: '/tmp/hook.cjs' } } as never).args;
+    assert.equal(native.includes('--sandbox'), false);
+    assert.equal(native.includes('--ask-for-approval'), false);
+  } finally {
+    if (before === undefined) delete process.env.AGENT_OFFICE_CODEX_PERMISSIONS;
+    else process.env.AGENT_OFFICE_CODEX_PERMISSIONS = before;
   }
 });
 

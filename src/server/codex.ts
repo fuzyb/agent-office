@@ -105,6 +105,34 @@ export function codexHookArgs(hookPath: string, platform: NodeJS.Platform = proc
   return args;
 }
 
+/** How much a Codex worker may do without asking (AGENT_OFFICE_CODEX_PERMISSIONS). */
+export type CodexPermissions = 'workspace' | 'native' | 'full';
+
+/** The office's setting: `workspace` unless it names `native` or `full`. */
+export function codexPermissions(value = process.env.AGENT_OFFICE_CODEX_PERMISSIONS): CodexPermissions {
+  const v = value?.trim().toLowerCase();
+  return v === 'native' || v === 'full' ? v : 'workspace';
+}
+
+/** Flags and overrides that already decide Codex's sandbox or approvals, in --agent-args. */
+const PERMISSION_FLAG = /^(?:-s|-a|--sandbox|--ask-for-approval|--full-auto|--yolo|--dangerously-bypass-approvals-and-sandbox)(?:=|$)/;
+const PERMISSION_CONFIG = /^(?:approval_policy|sandbox_mode|sandbox_workspace_write\.network_access)\s*=/;
+
+/**
+ * Each worker runs in a fresh worktree, which Codex treats as a project nobody has trusted, so it
+ * asks before every command. `workspace` gives it Codex's own Auto preset instead: it reads, edits and
+ * runs commands inside its folder without asking, with the network on so git push and gh work, and
+ * still asks to go outside the folder. `native` leaves Codex's own settings alone. `full` turns the
+ * sandbox and approvals off entirely. Whatever --agent-args already says about either wins.
+ */
+export function codexPermissionArgs(args: string[], mode: CodexPermissions = codexPermissions()): string[] {
+  if (mode === 'native') return [];
+  const decided = args.some((arg, i) => PERMISSION_FLAG.test(arg) || ((args[i - 1] === '-c' || args[i - 1] === '--config') && PERMISSION_CONFIG.test(arg)));
+  if (decided) return [];
+  if (mode === 'full') return ['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'];
+  return ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request', '-c', 'sandbox_workspace_write.network_access=true'];
+}
+
 /**
  * A worker's own model and reasoning effort on Codex's command line. Codex takes --model only once,
  * so one the office's --agent-args set gives way to the worker's; the effort is a config override,
