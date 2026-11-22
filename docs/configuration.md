@@ -62,3 +62,6 @@ agent-office tunnel [office@address | url] [--port <n>] [--office-port <n>] [--n
   the worker stops it. Given an SSH address it opens the tunnel to the office too.
   See docs/tunnel.md.
 ```
+
+**Codex workers' permissions** (`AGENT_OFFICE_CODEX_PERMISSIONS`): `workspace` (the default) starts Codex workers with `--sandbox workspace-write --ask-for-approval on-request` and network access, so they work inside their own folder without asking; `native` keeps your own Codex settings, which ask before every command in a fresh worktree; `full` turns Codex's sandbox and approvals off. A sandbox or approval setting in `--agent-args` wins. See [Agents](agents.md).
+

@@ -9,6 +9,8 @@ import {
   CODEX_HOOK_EVENTS,
   codexHookArgs,
   codexModelArgs,
+  codexPermissionArgs,
+  codexPermissions,
   normalizeCodexHook,
   validateCodexHook,
   writeCodexHook,
@@ -46,6 +48,115 @@ test('generates one stable CLI hook override per supported event', () => {
     assert.match(args[i * 2 + 1], /type="command"/);
     assert.match(args[i * 2 + 1], /timeout=3/);
     assert.match(args[i * 2 + 1], /agent-office-codex-hook\.cjs/);
+  }
+});
+
+test('keeps paths out of Windows shell expansion and retains POSIX apostrophe escaping', () => {
+  const file = "/office data/O'Neil/hook.cjs";
+  const commandOf = (platform: NodeJS.Platform) =>
+    JSON.parse(codexHookArgs(file, platform)[1].match(/command=("(?:[^"\\]|\\.)*")/)![1]) as string;
+  assert.ok(commandOf('win32').startsWith('node.exe -e "require(process.env.AGENT_OFFICE_CODEX_HOOK)"'));
+  assert.equal(commandOf('win32').includes(file), false);
+  assert.ok(commandOf('linux').includes(`'/office data/O'"'"'Neil/hook.cjs'`));
+});
+
+test('generated hooks execute through the native shell with spaced Unicode and apostrophe paths', async () => {
+  const dir = mkdtempSync(path.join(tmpdir(), "office Việt %TEMP% $env:TEMP ` & O'Neil ".replaceAll(':', '-')));
+  const events: string[] = [];
+  const server = createServer((req, res) => {
+    req.resume();
+    req.on('end', () => {
+      events.push(new URL(req.url!, 'http://localhost').searchParams.get('event')!);
+      res.writeHead(200).end();
+    });
+  });
+  try {
+    const file = writeCodexHook(dir);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    const address = server.address();
+    assert.ok(address && typeof address === 'object');
+    const args = codexHookArgs(file);
+    const windows = process.platform === 'win32';
+    const launched = codex.launch({ h: { info: {}, state: codex.createState!() } as never, args: [], setup: { hook: file } });
+    if (windows) {
+      assert.equal(launched.env?.AGENT_OFFICE_CODEX_HOOK, file);
+      const pathValue = Object.entries(launched.env!).find(([key]) => key.toUpperCase() === 'PATH')![1];
+      assert.equal(pathValue?.split(path.delimiter)[0], path.dirname(process.execPath));
+    }
+    const shells = windows ? ['cmd', 'powershell'] : ['sh'];
+    for (const bom of ['', '\uFEFF']) for (const shell of shells) for (const event of ['SessionStart', 'UserPromptSubmit', 'Stop']) {
+      const config = args[CODEX_HOOK_EVENTS.indexOf(event as typeof CODEX_HOOK_EVENTS[number]) * 2 + 1];
+      const command = JSON.parse(config.match(/command=("(?:[^"\\]|\\.)*")/)![1]) as string;
+      // Exercise both Codex Windows runners, rather than spawning the helper directly.
+      const program = shell === 'cmd' ? process.env.ComSpec || 'cmd.exe' : shell === 'powershell' ? 'powershell.exe' : '/bin/sh';
+      const shellArgs = shell === 'cmd' ? ['/C', `"${command}"`] : shell === 'powershell' ? ['-NoProfile', '-NonInteractive', '-Command', command] : ['-c', command];
+      const child = spawn(program, shellArgs, {
+          windowsVerbatimArguments: shell === 'cmd',
+          env: {
+            ...process.env,
+            ...launched.env,
+            AGENT_OFFICE_HOOK_URL: `http://127.0.0.1:${address.port}`,
+            AGENT_OFFICE_HOOK_TOKEN: 'test-token',
+            AGENT_OFFICE_WORKER_ID: 'test-worker',
+          },
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+      const result = await new Promise<{ code: number | null; stdout: string; stderr: string }>((resolve, reject) => {
+        let stdout = '', stderr = '';
+        child.stdout.on('data', (chunk) => { stdout += chunk; });
+        child.stderr.on('data', (chunk) => { stderr += chunk; });
+        child.on('error', reject);
+        child.on('close', (code) => resolve({ code, stdout, stderr }));
+        child.stdin.end(bom + JSON.stringify({ session_id: 'test-session', source: 'startup', prompt: 'test' }));
+      });
+      assert.equal(result.code, 0, result.stderr);
+      assert.equal(result.stdout, '{}');
+    }
+    assert.deepEqual(events, [0, 1].flatMap(() => shells.flatMap(() => ['SessionStart', 'UserPromptSubmit', 'Stop'])));
+  } finally {
+    await new Promise<void>((resolve) => server.close(() => resolve()));
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test('Codex workers get the workspace preset unless the office or --agent-args says otherwise', () => {
+  const workspace = ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request', '-c', 'sandbox_workspace_write.network_access=true'];
+  assert.equal(codexPermissions(undefined), 'workspace');
+  assert.equal(codexPermissions(''), 'workspace');
+  assert.equal(codexPermissions(' Native '), 'native');
+  assert.equal(codexPermissions('FULL'), 'full');
+  assert.equal(codexPermissions('anything else'), 'workspace');
+  assert.deepEqual(codexPermissionArgs([], 'workspace'), workspace);
+  assert.deepEqual(codexPermissionArgs(['--model', 'gpt-5.5', '-c', 'model_reasoning_effort="high"'], 'workspace'), workspace);
+  assert.deepEqual(codexPermissionArgs([], 'native'), []);
+  assert.deepEqual(codexPermissionArgs([], 'full'), ['--sandbox', 'danger-full-access', '--ask-for-approval', 'never']);
+  for (const own of [['--yolo'], ['--full-auto'], ['-s', 'read-only'], ['--sandbox=read-only'], ['-a', 'never'], ['--ask-for-approval', 'never'],
+    ['--dangerously-bypass-approvals-and-sandbox'], ['-c', 'approval_policy="never"'], ['--config', 'sandbox_mode="read-only"'], ['-c', 'sandbox_workspace_write.network_access=false']]) {
+    assert.deepEqual(codexPermissionArgs(own, 'workspace'), [], own.join(' '));
+    assert.deepEqual(codexPermissionArgs(own, 'full'), [], own.join(' '));
+  }
+  // A value that merely mentions a setting is not one.
+  assert.deepEqual(codexPermissionArgs(['--model', '-sandboxed'], 'workspace'), workspace);
+});
+
+test('the launch puts the permission flags ahead of resume and the prompt', () => {
+  const before = process.env.AGENT_OFFICE_CODEX_PERMISSIONS;
+  try {
+    delete process.env.AGENT_OFFICE_CODEX_PERMISSIONS;
+    const h = { info: {}, state: codex.createState!() } as never;
+    const { args } = codex.launch({ h, args: [], prompt: 'do it', resumeSessionId: 'thread-1', setup: { hook: '/tmp/hook.cjs' } } as never);
+    const at = (s: string) => args.indexOf(s);
+    assert.ok(at('--sandbox') >= 0 && at('--sandbox') < at('resume'));
+    assert.equal(args[at('--sandbox') + 1], 'workspace-write');
+    assert.equal(args[at('--ask-for-approval') + 1], 'on-request');
+    assert.ok(at('resume') < at('--'));
+    process.env.AGENT_OFFICE_CODEX_PERMISSIONS = 'native';
+    const native = codex.launch({ h, args: [], setup: { hook: '/tmp/hook.cjs' } } as never).args;
+    assert.equal(native.includes('--sandbox'), false);
+    assert.equal(native.includes('--ask-for-approval'), false);
+  } finally {
+    if (before === undefined) delete process.env.AGENT_OFFICE_CODEX_PERMISSIONS;
+    else process.env.AGENT_OFFICE_CODEX_PERMISSIONS = before;
   }
 });
 

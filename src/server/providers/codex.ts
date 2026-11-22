@@ -2,7 +2,7 @@
 // /hooks/codex; its usage is read from the root session's rollout (see codex-usage.ts).
 import { homedir } from 'node:os';
 import path from 'node:path';
-import { codexHookArgs, codexModelArgs, normalizeCodexHook, writeCodexHook } from '../codex.js';
+import { codexHookArgs, codexModelArgs, codexPermissionArgs, normalizeCodexHook, writeCodexHook } from '../codex.js';
 import { CodexUsageReader } from '../codex-usage.js';
 import { codexMcpArgs } from '../office-workers.js';
 import { reduceLifecycle, type ToolTracker } from '../workers/lifecycle.js';
@@ -94,11 +94,16 @@ export const codex: ProviderAdapter<CodexState, CodexSetup> = {
   launch({ h, args, prompt, resumeSessionId, setup }) {
     // Resumed too: Codex resumes on whatever its config says now, not on the model the session ran on.
     args = codexModelArgs(args, h.info.model, h.info.effort);
-    args.push(...codexHookArgs(setup.hook), ...(setup.mcpScript ? codexMcpArgs(setup.mcpScript) : []), '--no-alt-screen');
+    args.push(...codexPermissionArgs(args), ...codexHookArgs(setup.hook), ...(setup.mcpScript ? codexMcpArgs(setup.mcpScript) : []), '--no-alt-screen');
     if (resumeSessionId) args.push('resume', resumeSessionId);
     if (prompt) args.push('--', prompt);
     tracker(h.state).clear();
-    return { args, rotateToken: true };
+    // Codex can execute Windows hooks through cmd or its PowerShell environment executor.
+    const pathKey = Object.keys(process.env).find((key) => key.toUpperCase() === 'PATH') ?? 'PATH';
+    const env = process.platform === 'win32'
+      ? { [pathKey]: [path.dirname(process.execPath), process.env[pathKey]].filter(Boolean).join(path.delimiter), AGENT_OFFICE_CODEX_HOOK: setup.hook }
+      : undefined;
+    return { args, rotateToken: true, env };
   },
   bootHint: 'Open the terminal: complete login and review Office hooks in /hooks',
   hook: { strictJson: true, handle: codexHook },

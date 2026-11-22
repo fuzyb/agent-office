@@ -88,16 +88,49 @@ function shellQuote(value: string): string {
 
 /**
  * Build the CLI config overrides for all lifecycle hooks. The command is encoded as a TOML basic
- * string so paths containing spaces remain valid; the command itself is shell-quoted.
+ * string so paths containing spaces remain valid. Windows commands use an environment-provided
+ * helper path; POSIX commands retain shell quoting.
  */
-export function codexHookArgs(hookPath: string): string[] {
+export function codexHookArgs(hookPath: string, platform: NodeJS.Platform = process.platform): string[] {
   const args: string[] = [];
   for (const event of CODEX_HOOK_EVENTS) {
-    const command = [process.execPath, hookPath, event].map(shellQuote).join(' ');
+    // Windows runners include cmd and PowerShell. Keep paths out of both shells' expansion rules;
+    // the provider supplies the helper path in env and prepends this Node install to PATH.
+    const command = platform === 'win32'
+      ? `node.exe -e "require(process.env.AGENT_OFFICE_CODEX_HOOK)" agent-office-codex-hook.cjs ${event}`
+      : [process.execPath, hookPath, event].map(shellQuote).join(' ');
     const config = `hooks.${event}=[{hooks=[{type="command",command=${JSON.stringify(command)},timeout=3}]}]`;
     args.push('-c', config);
   }
   return args;
+}
+
+/** How much a Codex worker may do without asking (AGENT_OFFICE_CODEX_PERMISSIONS). */
+export type CodexPermissions = 'workspace' | 'native' | 'full';
+
+/** The office's setting: `workspace` unless it names `native` or `full`. */
+export function codexPermissions(value = process.env.AGENT_OFFICE_CODEX_PERMISSIONS): CodexPermissions {
+  const v = value?.trim().toLowerCase();
+  return v === 'native' || v === 'full' ? v : 'workspace';
+}
+
+/** Flags and overrides that already decide Codex's sandbox or approvals, in --agent-args. */
+const PERMISSION_FLAG = /^(?:-s|-a|--sandbox|--ask-for-approval|--full-auto|--yolo|--dangerously-bypass-approvals-and-sandbox)(?:=|$)/;
+const PERMISSION_CONFIG = /^(?:approval_policy|sandbox_mode|sandbox_workspace_write\.network_access)\s*=/;
+
+/**
+ * Each worker runs in a fresh worktree, which Codex treats as a project nobody has trusted, so it
+ * asks before every command. `workspace` gives it Codex's own Auto preset instead: it reads, edits and
+ * runs commands inside its folder without asking, with the network on so git push and gh work, and
+ * still asks to go outside the folder. `native` leaves Codex's own settings alone. `full` turns the
+ * sandbox and approvals off entirely. Whatever --agent-args already says about either wins.
+ */
+export function codexPermissionArgs(args: string[], mode: CodexPermissions = codexPermissions()): string[] {
+  if (mode === 'native') return [];
+  const decided = args.some((arg, i) => PERMISSION_FLAG.test(arg) || ((args[i - 1] === '-c' || args[i - 1] === '--config') && PERMISSION_CONFIG.test(arg)));
+  if (decided) return [];
+  if (mode === 'full') return ['--sandbox', 'danger-full-access', '--ask-for-approval', 'never'];
+  return ['--sandbox', 'workspace-write', '--ask-for-approval', 'on-request', '-c', 'sandbox_workspace_write.network_access=true'];
 }
 
 /**
@@ -149,7 +182,7 @@ process.stdin.on('error', () => finish(false));
 process.stdin.on('end', async () => {
   if (overflow || !EVENTS.has(event)) return finish(false);
   let input;
-  try { input = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch { return finish(false); }
+  try { input = JSON.parse(Buffer.concat(chunks).toString('utf8').replace(/^\uFEFF/, '')); } catch { return finish(false); }
   if (!input || typeof input !== 'object' || Array.isArray(input)) return finish(false);
   if (hasText(input.agent_id) || hasText(input.agent_type)) return finish(false);
   const session = allowed(input.session_id, MAX_ID);
